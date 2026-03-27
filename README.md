@@ -1,0 +1,2 @@
+# NeuroWatchMain
+NeuroWatch is an AI-powered online proctoring system designed to ensure fair and secure examinations. It leverages computer vision and machine learning to perform real-time monitoring, detect suspicious activities such as unusual movements or multiple persons, and generate automated reports. The system also features an AI-driven dynamic marking mechanism that adjusts scores based on detected behavior, enhancing transparency and exam integrity.
