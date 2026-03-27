@@ -1,4 +1,4 @@
-# neuroWatch  
+# NeuroWatch  
 ### AI-Powered Real-Time Exam Monitoring System
 
 ---
