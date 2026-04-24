@@ -196,6 +196,8 @@ const handleSubmit = async () => {
         if (log.event_type === "face_not_detected") fairness -= 1;
         if (log.event_type === "multiple_faces") fairness -= 2;
         if (log.event_type === "fullscreen_exit") fairness -= 1;
+        if (log.event_type === "copy_attempt") fairness -= 1;
+        if (log.event_type === "paste_attempt") fairness -= 1;
       });
 
       fairness = Math.max(0, fairness);
@@ -321,6 +323,76 @@ useEffect(() => {
   }
 }, [isFullScreen, sessionId]);
 
+useEffect(() => {
+  if (!tabFocused && sessionId) {
+    const now = Date.now();
+
+    if (!lastLogTime.current.tab || now - lastLogTime.current.tab > 5000) {
+      lastLogTime.current.tab = now;
+
+      fetch("http://localhost:5000/api/log-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          type: "tab_switch"
+        })
+      });
+    }
+  }
+}, [tabFocused, sessionId]);
+
+useEffect(() => {
+  const handleCopy = () => {
+    const now = Date.now();
+
+    if (!lastLogTime.current.copy || now - lastLogTime.current.copy > 5000) {
+      lastLogTime.current.copy = now;
+
+      fetch("http://localhost:5000/api/log-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          type: "copy_attempt"
+        })
+      });
+    }
+  };
+
+  const handlePaste = () => {
+    const now = Date.now();
+
+    if (!lastLogTime.current.paste || now - lastLogTime.current.paste > 5000) {
+      lastLogTime.current.paste = now;
+
+      fetch("http://localhost:5000/api/log-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          type: "paste_attempt"
+        })
+      });
+    }
+  };
+
+  document.addEventListener("copy", handleCopy);
+  document.addEventListener("paste", handlePaste);
+
+  return () => {
+    document.removeEventListener("copy", handleCopy);
+    document.removeEventListener("paste", handlePaste);
+  };
+}, [sessionId]);
+
+
   // Handle webcam retry
   const handleRetryCamera = () => {
     setCameraError(false);
@@ -425,6 +497,8 @@ useEffect(() => {
                       {log.event_type === "face_not_detected" && "Face Not Detected"}
                       {log.event_type === "multiple_faces" && "Multiple Faces Detected"}
                       {log.event_type === "fullscreen_exit" && "Exited Fullscreen"}
+                      {log.event_type === "copy_attempt" && "Copy Attempt"}
+                      {log.event_type === "paste_attempt" && "Paste Attempt"}
                     </strong>
                     {" — "}
                     {new Date(log.timestamp).toLocaleTimeString()}

@@ -64,7 +64,7 @@ const Header = ({ examTitle, timeLeft, examMode = false }) => {
         animate={{ opacity: 1, x: 0 }}
         transition={{ duration: 0.5 }}
       >
-        <span>ProctorAI</span>
+        <span>NeuroWatch</span>
       </Logo>
       
       {examMode && (
