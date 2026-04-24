@@ -130,7 +130,7 @@ export default function StudentLogin() {
       
       if (res.ok) {
         const data = await res.json();
-        navigate('/exam', { state: { exam: data.exam, sessionId: data.session_id } });
+        navigate('/exam-setup', { state: { exam: data.exam, sessionId: data.session_id } });
       } else {
         const data = await res.json();
         setError(data.error || 'Invalid credentials or exam code');

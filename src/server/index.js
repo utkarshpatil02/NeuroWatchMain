@@ -16,7 +16,8 @@ app.use(cors({
 
 // Supabase setup
 const supabase = createClient(
-  
+  'https://dxeldmyxiyhfxubjagnr.supabase.co',
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR4ZWxkbXl4aXloZnh1YmphZ25yIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NjMxMzU4NSwiZXhwIjoyMDkxODg5NTg1fQ.xEdf7ZcFgFq5BNor-MCFmEGcTXlBwP9bjMv1L38rHFU'
 );
 
 // Session setup
@@ -437,6 +438,55 @@ app.get('/api/exams', async (req, res) => {
   } catch (error) {
     console.error('Error fetching exams:', error);
     res.status(500).json({ error: 'Error fetching exams' });
+  }
+});
+
+// ✅ NEW: Proctoring Log API
+app.post('/api/log-event', async (req, res) => {
+  try {
+    const { session_id, type } = req.body;
+
+    if (!session_id || !type) {
+      return res.status(400).json({ error: 'Missing data' });
+    }
+
+    const { error } = await supabase
+      .from('proctor_logs')
+      .insert([
+        {
+          session_id,
+          event_type: type,
+          timestamp: new Date().toISOString()
+        }
+      ]);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.error('Log error:', err);
+    res.status(500).json({ error: 'Failed to log event' });
+  }
+});
+
+// ✅ NEW: Get logs for a session
+app.get('/api/logs/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    const { data, error } = await supabase
+      .from('proctor_logs')
+      .select('*')
+      .eq('session_id', sessionId);
+
+    if (error) throw error;
+
+    res.json(data);
+
+  } catch (err) {
+    console.error('Fetch logs error:', err);
+    res.status(500).json({ error: 'Failed to fetch logs' });
   }
 });
 

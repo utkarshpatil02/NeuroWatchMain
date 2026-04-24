@@ -1,9 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import { motion } from 'framer-motion';
 import { FiCamera, FiMonitor, FiCheckCircle, FiAlertCircle } from 'react-icons/fi';
 import { useLocation } from 'react-router-dom';
-
 import Header from '../common/Header';
 import Card from '../common/Card';
 import Button from '../common/Button';
@@ -121,19 +120,24 @@ const ExamInterface = () => {
   const [exam, setExam] = useState(null);
   const [questions, setQuestions] = useState([]);
   const [score, setScore] = useState(null);
+  const [logWarnings, setLogWarnings] = useState(0);
+  const [logs, setLogs] = useState([]);
+  const [showReport, setShowReport] = useState(false);
+  const [fairnessScore, setFairnessScore] = useState(10);
+  const [riskLevel, setRiskLevel] = useState("Low");
   const location = useLocation();
   const { exam: examData, sessionId } = location.state || {};
-
-  const { 
-    isFullScreen, 
-    tabFocused, 
-    faceDetected,
-    multipleFaces,
-    warnings,
-    webcamRef,
-    requestFullScreen,
-    startWebcam
-  } = useProctoring(sessionId);
+  const lastLogTime = useRef({});
+const { 
+  isFullScreen, 
+  tabFocused, 
+  faceDetected,
+  multipleFaces,
+  warnings,
+  webcamRef,
+  requestFullScreen,
+  startWebcam
+} = useProctoring(sessionId);
 
   // Fetch exam questions
   useEffect(() => {
@@ -156,27 +160,69 @@ const ExamInterface = () => {
       [questionId]: optionId
     }));
   };
-
-  // Submit exam
-  const handleSubmit = async () => {
-    try {
-      const res = await fetch(`http://localhost:5000/api/exams/${exam.id}/submit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ examId: exam.id, sessionId, answers })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setScore(data.score);
-        setExamSubmitted(true);
-      } else {
-        console.error('Error submitting exam:', data.error);
-      }
-    } catch (err) {
-      console.error('Error submitting exam:', err);
-    }
+  const getRiskColor = () => {
+    if (riskLevel === "High") return "red";
+    if (riskLevel === "Moderate") return "orange";
+    return "green";
   };
+  // Submit exam
+const handleSubmit = async () => {
+  try {
+    const res = await fetch(`http://localhost:5000/api/exams/${exam.id}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ examId: exam.id, sessionId, answers })
+    });
+
+    const data = await res.json();
+
+    if (res.ok) {
+      setScore(data.score);
+
+      // ✅ fetch logs from backend
+      const logsRes = await fetch(`http://localhost:5000/api/logs/${sessionId}`);
+      const logsData = await logsRes.json();
+
+      // ✅ store logs
+      setLogWarnings(logsData.length);
+      setLogs(logsData);
+
+      // 🔥 Fairness Score calculation
+      let fairness = 10;
+
+      logsData.forEach(log => {
+        if (log.event_type === "tab_switch") fairness -= 1;
+        if (log.event_type === "face_not_detected") fairness -= 1;
+        if (log.event_type === "multiple_faces") fairness -= 2;
+        if (log.event_type === "fullscreen_exit") fairness -= 1;
+      });
+
+      fairness = Math.max(0, fairness);
+      setFairnessScore(fairness);
+
+      // 🔥 Risk Level calculation
+      let risk = "Low";
+
+      if (fairness <= 5) {
+        risk = "High";
+      } else if (fairness <= 7) {
+        risk = "Moderate";
+      }
+
+      setRiskLevel(risk);
+
+      // ✅ finish
+      setExamSubmitted(true);
+
+    } else {
+      console.error('Error submitting exam:', data.error);
+    }
+
+  } catch (err) {
+    console.error('Error submitting exam:', err);
+  }
+};
 
   // Initialize exam environment
   useEffect(() => {
@@ -210,6 +256,71 @@ const ExamInterface = () => {
     };
   }, []);
 
+useEffect(() => {
+  if (!faceDetected && sessionId && !cameraError) {
+    const now = Date.now();
+
+    if (!lastLogTime.current.face || now - lastLogTime.current.face > 5000) {
+      lastLogTime.current.face = now;
+
+      fetch("http://localhost:5000/api/log-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          type: "face_not_detected"
+        })
+      });
+    }
+  }
+}, [faceDetected, sessionId, cameraError]);
+
+// 👇 UPDATED multiple faces
+useEffect(() => {
+  if (multipleFaces && sessionId) {
+    const now = Date.now();
+
+    if (!lastLogTime.current.multi || now - lastLogTime.current.multi > 5000) {
+      lastLogTime.current.multi = now;
+
+      fetch("http://localhost:5000/api/log-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          type: "multiple_faces"
+        })
+      });
+    }
+  }
+}, [multipleFaces, sessionId]);
+
+// 👇 UPDATED fullscreen
+useEffect(() => {
+  if (!isFullScreen && sessionId) {
+    const now = Date.now();
+
+    if (!lastLogTime.current.fullscreen || now - lastLogTime.current.fullscreen > 5000) {
+      lastLogTime.current.fullscreen = now;
+
+      fetch("http://localhost:5000/api/log-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          type: "fullscreen_exit"
+        })
+      });
+    }
+  }
+}, [isFullScreen, sessionId]);
+
   // Handle webcam retry
   const handleRetryCamera = () => {
     setCameraError(false);
@@ -222,38 +333,111 @@ const ExamInterface = () => {
     });
   };
 
-  if (examSubmitted) {
-    return (
-      <ExamContainer>
-        <Header examTitle={exam?.title} timeLeft={0} examMode={true} />
-        <div style={{ padding: '4rem', textAlign: 'center' }}>
-          <motion.div
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ type: "spring", stiffness: 260, damping: 20 }}
-          >
-            <FiCheckCircle size={100} color="var(--success)" />
-          </motion.div>
-          <motion.h1
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.3 }}
-          >
-            Exam Submitted Successfully!
-          </motion.h1>
-          <motion.p
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.5 }}
-            style={{ fontSize: '1.2rem', maxWidth: '600px', margin: '20px auto' }}
-          >
-            Your score: {score} points. Thank you for completing the exam. Your responses have been recorded.
+ if (examSubmitted) {
+  return (
+    <ExamContainer>
+      <Header examTitle={exam?.title} timeLeft={0} examMode={true} />
+
+      {/* ✅ Animate whole result section */}
+      <motion.div
+        initial={{ opacity: 0, y: 30 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6 }}
+        style={{ padding: '4rem', textAlign: 'center' }}
+      >
+        {/* Icon animation */}
+        <motion.div
+          initial={{ scale: 0 }}
+          animate={{ scale: 1 }}
+          transition={{ type: "spring", stiffness: 260, damping: 20 }}
+        >
+          <FiCheckCircle size={100} color="var(--success)" />
+        </motion.div>
+
+        {/* Title animation */}
+        <motion.h1
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.3 }}
+        >
+          Exam Submitted Successfully!
+        </motion.h1>
+
+        {/* Text section */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.5 }}
+          style={{ fontSize: '1.2rem', maxWidth: '600px', margin: '20px auto' }}
+        >
+          <p>Your score: {score} points.</p>
+          <p>Warnings detected: {logWarnings}.</p>
+          <p>Fairness Score: {fairnessScore}/10</p>
+
+          <p>
+            Risk Level:
+            <motion.span
+              key={riskLevel}
+              initial={{ opacity: 0, scale: 0.5 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+              style={{
+                color: getRiskColor(),
+                fontWeight: "bold",
+                marginLeft: "5px"
+              }}
+            >
+              {riskLevel}
+            </motion.span>
+          </p>
+
+          <p>
+            Thank you for completing the exam. Your responses have been recorded.
             You may now close this window.
-          </motion.p>
-        </div>
-      </ExamContainer>
-    );
-  }
+          </p>
+        </motion.div>
+
+        {/* ✅ Button OUTSIDE text */}
+        <button
+          onClick={() => setShowReport(!showReport)}
+          style={{ marginTop: "20px", padding: "10px 20px", cursor: "pointer" }}
+        >
+          {showReport ? "Hide Cheating Report" : "Show Cheating Report"}
+        </button>
+
+        {/* ✅ Report section */}
+        {showReport && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            style={{ marginTop: "20px", textAlign: "left" }}
+          >
+            <h3>Cheating Report:</h3>
+
+            {logs.length === 0 ? (
+              <p>No suspicious activity detected.</p>
+            ) : (
+              <ul>
+                {logs.map((log, index) => (
+                  <li key={index}>
+                    <strong>
+                      {log.event_type === "tab_switch" && "Tab Switching"}
+                      {log.event_type === "face_not_detected" && "Face Not Detected"}
+                      {log.event_type === "multiple_faces" && "Multiple Faces Detected"}
+                      {log.event_type === "fullscreen_exit" && "Exited Fullscreen"}
+                    </strong>
+                    {" — "}
+                    {new Date(log.timestamp).toLocaleTimeString()}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </motion.div>
+        )}
+      </motion.div>
+    </ExamContainer>
+  );
+}
 
   return (
     <ExamContainer>

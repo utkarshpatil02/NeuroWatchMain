@@ -10,6 +10,9 @@ import ExamInterface from './components/exam/ExamInterface';
 import ProctorDashboard from './components/dashboard/ProctorDashboard';
 import ProtectedRoute from './components/ProtectedRoute';
 
+// ✅ ADD THIS LINE (NEW)
+import ExamSetup from './pages/ExamSetup';
+
 function App() {
   return (
     <Router>
@@ -20,6 +23,18 @@ function App() {
         <Route path="/student-signin" element={<StudentSignIn />} />
         <Route path="/admin-login" element={<AdminLogin />} />
         <Route path="/admin-signin" element={<AdminSignIn />} />
+
+        {/* ✅ NEW SETUP PAGE */}
+        <Route
+          path="/exam-setup"
+          element={
+            <ProtectedRoute role="student">
+              <ExamSetup />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* EXISTING EXAM ROUTE (UNCHANGED) */}
         <Route
           path="/exam"
           element={
@@ -28,6 +43,8 @@ function App() {
             </ProtectedRoute>
           }
         />
+
+        {/* EXISTING ADMIN ROUTE (UNCHANGED) */}
         <Route
           path="/proctor"
           element={
