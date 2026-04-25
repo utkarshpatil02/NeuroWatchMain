@@ -16,8 +16,8 @@ app.use(cors({
 
 // Supabase setup
 const supabase = createClient(
-  'https://dxeldmyxiyhfxubjagnr.supabase.co',
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR4ZWxkbXl4aXloZnh1YmphZ25yIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NjMxMzU4NSwiZXhwIjoyMDkxODg5NTg1fQ.xEdf7ZcFgFq5BNor-MCFmEGcTXlBwP9bjMv1L38rHFU'
+  //paste supabase url
+  //paste supaabse key
 );
 
 // Session setup
