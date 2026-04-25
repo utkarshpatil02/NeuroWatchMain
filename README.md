@@ -117,11 +117,6 @@ ai-exam-proctoring-tool/
 
 ---
 
-## License
-
-MIT License
-
----
 
 ## Credits
 
