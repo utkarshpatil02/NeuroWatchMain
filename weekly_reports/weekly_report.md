@@ -5,10 +5,10 @@
 ## Team Members
 
 - **Team Lead:** Utkarsh Patil (R23EF293)  
-- **Marketing Lead:** Udbhav Pandey (R23EF287)  
-- **Customer Contact Lead:** Suhaib Asrar (R23EF265)  
-- **Technical Lead:** Umar Owais (R23EF290)  
-- **Testing Lead:** Tarun Pal (R23EF281)  
+- **Udbhav Pandey (R23EF287)**  
+- **Suhaib Asrar (R23EF265)**  
+- **Umar Owais (R23EF290)**  
+- **Tarun Pal (R23EF281)**  
 
 ---
 
@@ -31,19 +31,19 @@
 - Coordinated team activities  
 - Finalized the problem statement and project direction  
 
-**Udbhav Pandey (Marketing Lead)**  
+**Udbhav Pandey**  
 - Researched existing proctoring solutions  
 - Analyzed competitors and market requirements  
 
-**Suhaib Asrar (Customer Contact Lead)**  
+**Suhaib Asrar**  
 - Conducted interviews with students and faculty  
 - Collected and summarized user feedback  
 
-**Umar Owais (Technical Lead)**  
+**Umar Owais**  
 - Explored AI and computer vision technologies  
 - Planned system workflow and features  
 
-**Tarun Pal (Testing Lead)**  
+**Tarun Pal**  
 - Defined initial testing scenarios  
 - Identified expected system behavior  
 
@@ -68,27 +68,106 @@
 - Managed team progress and ensured timely completion of tasks  
 - Reviewed PRS and presentation content  
 
-**Udbhav Pandey (Marketing Lead)**  
+**Udbhav Pandey**  
 - Defined product positioning and USP  
 - Contributed to presentation development  
 
-**Suhaib Asrar (Customer Contact Lead)**  
+**Suhaib Asrar**  
 - Validated problem statement through user feedback  
 - Gathered insights on proposed solution  
 
-**Umar Owais (Technical Lead)**  
+**Umar Owais**  
 - Worked on prototype development  
 - Implemented core system workflow  
 
-**Tarun Pal (Testing Lead)**  
+**Tarun Pal**  
 - Tested prototype functionality  
 - Identified issues and suggested improvements  
+
+---
+
+## Week 3 Progress
+
+### Work Done
+
+- Integrated AI-based proctoring features (face detection, tab switching detection, fullscreen monitoring)  
+- Implemented event logging system using Supabase  
+- Developed backend APIs for storing and retrieving cheating logs  
+- Connected frontend with backend for real-time logging  
+- Added warning system for suspicious activities  
+- Improved UI/UX for exam interface and monitoring indicators  
+
+---
+
+### Work Distribution
+
+**Utkarsh Patil (Team Lead)**  
+- Supervised backend integration and ensured smooth API communication  
+- Coordinated feature integration across frontend and backend  
+
+**Udbhav Pandey**  
+- Assisted in UI improvements and user experience design  
+- Documented feature updates for presentation  
+
+**Suhaib Asrar**  
+- Tested user flow during exam and provided feedback  
+- Validated real-world usability of proctoring features  
+
+**Umar Owais**  
+- Implemented proctoring logic (face detection, tab tracking, fullscreen detection)  
+- Developed logging APIs and integrated Supabase database  
+
+**Tarun Pal**  
+- Tested edge cases (tab switching, camera failure, multiple faces)  
+- Reported bugs and verified fixes  
+
+---
+
+## Week 4 Progress
+
+### Work Done
+
+- Implemented cheating report system (logs displayed after exam)  
+- Developed Fairness Score calculation system based on detected events  
+- Introduced Risk Level classification (Low / Moderate / High)  
+- Added cooldown logic to prevent log spamming  
+- Designed result page with score, warnings, and cheating report toggle  
+- Replaced UI animations with NeuroWatch-themed AI scanner  
+- Improved system stability and performance  
+
+---
+
+### Work Distribution
+
+**Utkarsh Patil (Team Lead)**  
+- Finalized scoring logic and system behavior  
+- Reviewed overall system performance and UI  
+
+**Udbhav Pandey**  
+- Worked on presentation updates and feature explanation  
+- Assisted in UI enhancements  
+
+**Suhaib Asrar**  
+- Collected feedback on result and report features  
+- Verified clarity of cheating reports for users  
+
+**Umar Owais**  
+- Implemented fairness score, risk level logic, and report system  
+- Integrated frontend display with backend logs  
+
+**Tarun Pal**  
+- Tested scoring accuracy and report correctness  
+- Ensured system reliability under multiple scenarios  
 
 ---
 
 ## Overall Summary
 
 - Successfully validated the problem through user interactions  
-- Designed an AI-based proctoring solution (neuroWatch)  
-- Developed an initial prototype and supporting documentation  
+- Designed and developed an AI-based proctoring solution (neuroWatch)  
+- Implemented real-time monitoring and cheating detection features  
+- Developed a fairness scoring and reporting system  
+- Built a working prototype with backend integration (Supabase)  
 - Prepared presentation and demonstration materials  
+
+---
