@@ -1,3 +1,6 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 import express from 'express';
 import session from 'express-session';
 import passport from 'passport';
@@ -6,6 +9,10 @@ import bcrypt from 'bcryptjs';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
+
+// Load .env from this directory, not the process working directory
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 app.use(express.json());
@@ -16,13 +23,13 @@ app.use(cors({
 
 // Supabase setup
 const supabase = createClient(
-  //paste supabase url
-  //paste supaabse key
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
 );
 
 // Session setup
 app.use(session({
-  secret: 'your_secret',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: { 
