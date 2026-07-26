@@ -2,7 +2,13 @@ import axios from 'axios';
 import { io } from 'socket.io-client';
 
 const API_URL = 'http://localhost:5000/api';
-const socket = io('http://localhost:5000');
+const SOCKET_URL = 'http://localhost:5000';
+
+// The backend does not run a socket.io server yet. Connecting on import makes
+// the client poll /socket.io/ forever, retrying on every 404. Stay offline
+// until proctoringService.connectRealtime() is called; queued emits flush once
+// a connection is established.
+const socket = io(SOCKET_URL, { autoConnect: false });
 
 // Create axios instance
 const api = axios.create({
@@ -104,6 +110,21 @@ export const proctoringService = {
   },
   
   // Socket.io methods
+  // Call once a socket.io server is running on SOCKET_URL. Until then the
+  // socket stays disconnected and emits are queued rather than sent.
+  connectRealtime: () => {
+    if (!socket.connected) {
+      socket.connect();
+    }
+    return socket;
+  },
+
+  disconnectRealtime: () => {
+    if (socket.connected) {
+      socket.disconnect();
+    }
+  },
+
   joinExamSession: (sessionId) => {
     socket.emit('join-exam-session', sessionId);
   },
