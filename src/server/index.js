@@ -441,7 +441,8 @@ app.get('/api/exams', async (req, res) => {
     
     if (error) throw error;
 
-    res.json(exams);
+    // Wrapped in { data } to match api.js, which reads response.data.data.
+    res.json({ data: exams });
   } catch (error) {
     console.error('Error fetching exams:', error);
     res.status(500).json({ error: 'Error fetching exams' });
@@ -494,6 +495,411 @@ app.get('/api/logs/:sessionId', async (req, res) => {
   } catch (err) {
     console.error('Fetch logs error:', err);
     res.status(500).json({ error: 'Failed to fetch logs' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Routes consumed by src/services/api.js
+//
+// Two things to know before editing these.
+//
+// 1. Session identifiers. exam_sessions has both `id` (uuid primary key) and
+//    `session_id` (the value handed to the client at login). The child tables
+//    key off different columns: responses.session_id references
+//    exam_sessions.id, while proctor_logs.session_id references
+//    exam_sessions.session_id. The client only ever holds session_id, so
+//    resolve it with loadSession() before touching responses.
+//
+// 2. Response envelope. api.js reads `response.data.data` on every call, so
+//    these routes wrap their payload in { data: ... }.
+// ---------------------------------------------------------------------------
+
+// Resolve the client's session_id to the exam_sessions row.
+const loadSession = async (sessionId) => {
+  const { data, error } = await supabase
+    .from('exam_sessions')
+    .select('id, session_id, exam_id, student_id, status, start_time, end_time')
+    .eq('session_id', sessionId)
+    .single();
+
+  if (error || !data) return null;
+  return data;
+};
+
+// Students may only touch their own session; admins may touch any.
+const canAccessSession = (user, session) =>
+  user.role === 'admin' || session.student_id === user.id;
+
+const requireAuth = (req, res, next) => {
+  if (!req.isAuthenticated()) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+};
+
+// Start an exam session. The student login route already creates one; this is
+// the entry point used by the standalone registration screen.
+app.post('/api/exams/sessions', requireAuth, async (req, res) => {
+  try {
+    const { examId } = req.body;
+
+    const { data: exam, error: examError } = await supabase
+      .from('exams')
+      .select('id, title, duration')
+      .eq('id', examId)
+      .single();
+
+    if (examError || !exam) {
+      return res.status(404).json({ error: 'Exam not found' });
+    }
+
+    const session_id = uuidv4();
+    const { error: insertError } = await supabase
+      .from('exam_sessions')
+      .insert({
+        student_id: req.user.role === 'student' ? req.user.id : null,
+        exam_id: exam.id,
+        session_id,
+        status: 'active'
+      });
+
+    if (insertError) throw insertError;
+
+    // `id` is the session_id string, since that is the handle every other
+    // client call passes back.
+    res.status(201).json({
+      data: {
+        id: session_id,
+        sessionId: session_id,
+        examId: exam.id,
+        title: exam.title,
+        duration: exam.duration
+      }
+    });
+  } catch (error) {
+    console.error('Error starting exam session:', error);
+    res.status(500).json({ error: 'Error starting exam session' });
+  }
+});
+
+// Record an answer. Scored immediately against the question's correct_answer.
+app.post('/api/exams/answers', requireAuth, async (req, res) => {
+  try {
+    const { sessionId, questionId, optionId } = req.body;
+
+    if (!sessionId || !questionId) {
+      return res.status(400).json({ error: 'sessionId and questionId are required' });
+    }
+
+    const session = await loadSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    if (!canAccessSession(req.user, session)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    if (session.status !== 'active') {
+      return res.status(409).json({ error: 'Session is no longer active' });
+    }
+
+    const { data: question, error: questionError } = await supabase
+      .from('questions')
+      .select('id, correct_answer, points')
+      .eq('id', questionId)
+      .single();
+
+    if (questionError || !question) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    const score = optionId === question.correct_answer ? question.points : 0;
+
+    // No unique constraint on (session_id, question_id), so update in place
+    // when the student changes their answer rather than upserting.
+    const { data: existing } = await supabase
+      .from('responses')
+      .select('id')
+      .eq('session_id', session.id)
+      .eq('question_id', questionId)
+      .maybeSingle();
+
+    if (existing) {
+      const { error: updateError } = await supabase
+        .from('responses')
+        .update({ answer: optionId, score })
+        .eq('id', existing.id);
+      if (updateError) throw updateError;
+    } else {
+      const { error: insertError } = await supabase
+        .from('responses')
+        .insert({
+          session_id: session.id,
+          question_id: questionId,
+          answer: optionId,
+          score
+        });
+      if (insertError) throw insertError;
+    }
+
+    // Deliberately does not return `score`, so the client cannot use this
+    // endpoint to probe the correct answer mid-exam.
+    res.json({ data: { questionId, answer: optionId, saved: true } });
+  } catch (error) {
+    console.error('Error saving answer:', error);
+    res.status(500).json({ error: 'Error saving answer' });
+  }
+});
+
+// Finish a session and total up the score.
+app.post('/api/exams/sessions/:sessionId/submit', requireAuth, async (req, res) => {
+  try {
+    const session = await loadSession(req.params.sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    if (!canAccessSession(req.user, session)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const { error: updateError } = await supabase
+      .from('exam_sessions')
+      .update({ status: 'completed', end_time: new Date().toISOString() })
+      .eq('id', session.id);
+
+    if (updateError) throw updateError;
+
+    const { data: responses, error: responseError } = await supabase
+      .from('responses')
+      .select('score')
+      .eq('session_id', session.id);
+
+    if (responseError) throw responseError;
+
+    const { data: questions, error: questionError } = await supabase
+      .from('questions')
+      .select('points')
+      .eq('exam_id', session.exam_id);
+
+    if (questionError) throw questionError;
+
+    const score = responses.reduce((sum, r) => sum + (r.score || 0), 0);
+    const totalPoints = questions.reduce((sum, q) => sum + (q.points || 0), 0);
+
+    res.json({
+      data: {
+        sessionId: session.session_id,
+        status: 'completed',
+        score,
+        totalPoints,
+        answered: responses.length,
+        totalQuestions: questions.length
+      }
+    });
+  } catch (error) {
+    console.error('Error submitting exam:', error);
+    res.status(500).json({ error: 'Error submitting exam' });
+  }
+});
+
+// Per-question results for a finished session.
+app.get('/api/exams/sessions/:sessionId/results', requireAuth, async (req, res) => {
+  try {
+    const session = await loadSession(req.params.sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    if (!canAccessSession(req.user, session)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const { data: responses, error: responseError } = await supabase
+      .from('responses')
+      .select('question_id, answer, score, questions(text, points, correct_answer)')
+      .eq('session_id', session.id);
+
+    if (responseError) throw responseError;
+
+    const score = responses.reduce((sum, r) => sum + (r.score || 0), 0);
+    const totalPoints = responses.reduce(
+      (sum, r) => sum + (r.questions?.points || 0),
+      0
+    );
+
+    res.json({
+      data: {
+        sessionId: session.session_id,
+        status: session.status,
+        score,
+        totalPoints,
+        responses: responses.map((r) => ({
+          questionId: r.question_id,
+          question: r.questions?.text,
+          answer: r.answer,
+          correctAnswer: r.questions?.correct_answer,
+          score: r.score,
+          points: r.questions?.points
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching results:', error);
+    res.status(500).json({ error: 'Error fetching results' });
+  }
+});
+
+// Record a proctoring event.
+//
+// proctor_logs only has (session_id, event_type, timestamp), so `details` and
+// any screenshot sent by the client are accepted but not persisted. Storing
+// them needs new columns.
+app.post('/api/proctoring/log', requireAuth, async (req, res) => {
+  try {
+    const { sessionId, eventType } = req.body;
+
+    if (!sessionId || !eventType) {
+      return res.status(400).json({ error: 'sessionId and eventType are required' });
+    }
+
+    const session = await loadSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    if (!canAccessSession(req.user, session)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const { error } = await supabase
+      .from('proctor_logs')
+      .insert({
+        session_id: session.session_id,
+        event_type: eventType,
+        timestamp: new Date().toISOString()
+      });
+
+    if (error) throw error;
+
+    res.status(201).json({ data: { logged: true, eventType } });
+  } catch (error) {
+    console.error('Error logging proctoring event:', error);
+    res.status(500).json({ error: 'Error logging proctoring event' });
+  }
+});
+
+// Proctoring log for one session.
+app.get('/api/proctoring/sessions/:sessionId/logs', requireAuth, async (req, res) => {
+  try {
+    const session = await loadSession(req.params.sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    if (!canAccessSession(req.user, session)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // proctor_logs keys off session_id, not the exam_sessions primary key.
+    const { data, error } = await supabase
+      .from('proctor_logs')
+      .select('id, session_id, event_type, timestamp')
+      .eq('session_id', session.session_id)
+      .order('timestamp', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({ data });
+  } catch (error) {
+    console.error('Error fetching session logs:', error);
+    res.status(500).json({ error: 'Error fetching session logs' });
+  }
+});
+
+// Every session for an exam, with each student's proctoring event count.
+app.get('/api/proctoring/exams/:examId/sessions', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const { data: sessions, error } = await supabase
+      .from('exam_sessions')
+      .select('id, session_id, status, start_time, end_time, students(id, name, email)')
+      .eq('exam_id', req.params.examId);
+
+    if (error) throw error;
+
+    const withCounts = await Promise.all(
+      sessions.map(async (s) => {
+        const { count } = await supabase
+          .from('proctor_logs')
+          .select('id', { count: 'exact', head: true })
+          .eq('session_id', s.session_id);
+
+        return {
+          id: s.session_id,
+          sessionId: s.session_id,
+          status: s.status,
+          startTime: s.start_time,
+          endTime: s.end_time,
+          student: s.students
+            ? { id: s.students.id, name: s.students.name, email: s.students.email }
+            : null,
+          eventCount: count || 0
+        };
+      })
+    );
+
+    res.json({ data: withCounts });
+  } catch (error) {
+    console.error('Error fetching exam sessions:', error);
+    res.status(500).json({ error: 'Error fetching exam sessions' });
+  }
+});
+
+// One exam with its questions. Students never receive correct_answer.
+// Declared after the /api/exams/sessions routes so those match first.
+app.get('/api/exams/:examId', requireAuth, async (req, res) => {
+  try {
+    const isAdmin = req.user.role === 'admin';
+
+    const { data: exam, error: examError } = await supabase
+      .from('exams')
+      .select('id, title, exam_code, duration')
+      .eq('id', req.params.examId)
+      .single();
+
+    if (examError || !exam) {
+      return res.status(404).json({ error: 'Exam not found' });
+    }
+
+    const { data: questions, error: questionError } = await supabase
+      .from('questions')
+      .select('id, text, type, points, correct_answer, options(option_id, text)')
+      .eq('exam_id', exam.id);
+
+    if (questionError) throw questionError;
+
+    res.json({
+      data: {
+        id: exam.id,
+        title: exam.title,
+        duration: exam.duration,
+        examCode: isAdmin ? exam.exam_code : undefined,
+        questions: questions.map((q) => ({
+          id: q.id,
+          text: q.text,
+          type: q.type,
+          points: q.points,
+          options: (q.options || []).map((o) => ({
+            id: o.option_id,
+            optionId: o.option_id,
+            text: o.text
+          })),
+          ...(isAdmin ? { correctAnswer: q.correct_answer } : {})
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching exam:', error);
+    res.status(500).json({ error: 'Error fetching exam' });
   }
 });
 

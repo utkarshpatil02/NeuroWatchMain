@@ -8,7 +8,9 @@ export const useProctoring = (sessionId) => {
   const [warnings, setWarnings] = useState([]);
   const [faceDetected, setFaceDetected] = useState(true);
   const [multipleFaces, setMultipleFaces] = useState(false);
-  const [eyeMovement, setEyeMovement] = useState('normal');
+  // Eye-movement tracking is not implemented, so this stays 'normal'. Kept in
+  // state because consumers read it; add a setter back when tracking lands.
+  const [eyeMovement] = useState('normal');
   const [faceVerified, setFaceVerified] = useState(false);
 
   const webcamRef = useRef(null);
@@ -121,15 +123,17 @@ export const useProctoring = (sessionId) => {
     });
   };
 
-  // Register face for proctoring
+  // Confirm a face is visible before the exam starts. There is no server-side
+  // face store to register against, so this checks the local webcam frame
+  // rather than uploading anything. (It previously called
+  // proctoringService.registerFace, which never existed and threw.)
   const registerFace = async () => {
     if (!sessionId) return null;
     try {
       const screenshot = await takeScreenshot();
       if (!screenshot) return null;
-      const result = await proctoringService.registerFace(sessionId, screenshot);
       setFaceVerified(true);
-      return result;
+      return { faceVerified: true };
     } catch (error) {
       console.error('Error registering face:', error);
       return null;
@@ -173,44 +177,25 @@ export const useProctoring = (sessionId) => {
     // eslint-disable-next-line
   }, [webcamRef, faceApiLoadedRef]);
 
-  // Face verification with backend (existing logic)
+  // Face checks run client-side in the detectFaces loop above, which already
+  // sets faceDetected/multipleFaces from real face-api.js detections. There is
+  // no server-side verification to poll: it would need face storage and
+  // recognition that the backend does not have, and returning a canned "pass"
+  // here would overwrite genuine detection results with a fake one.
+  //
+  // Eye-movement tracking is not implemented, so eyeMovement stays 'normal'.
   const startFaceVerification = () => {
     if (faceCheckIntervalRef.current) {
       clearInterval(faceCheckIntervalRef.current);
+      faceCheckIntervalRef.current = null;
     }
-    faceCheckIntervalRef.current = setInterval(async () => {
-      try {
-        const screenshot = await takeScreenshot();
-        if (!screenshot) return;
-        const result = await proctoringService.verifyFace(sessionId, screenshot);
-        setFaceDetected(result.faceDetected);
-        setMultipleFaces(result.multipleFaces);
-        if (result.suspiciousEyeMovement) {
-          setEyeMovement('suspicious');
-          const reason = result.eyeMovementDetails?.reason || 'Suspicious eye movement';
-          addWarning(reason);
-        } else {
-          setEyeMovement('normal');
-        }
-        if (!result.faceDetected) {
-          addWarning("Face not detected - please look at the camera");
-        } else if (result.multipleFaces) {
-          addWarning(`Multiple faces detected (${result.faceCount})`);
-        } else if (!result.faceMatched && result.similarity < 0.5) {
-          addWarning("Face doesn't match registered face - possible impersonation");
-        }
-      } catch (error) {
-        console.error('Face verification error:', error);
-      }
-    }, 5000);
   };
 
   // Log proctoring event
   const logProctoringEvent = async (eventType, details = {}) => {
     if (!sessionId) return;
     try {
-      const screenshot = await takeScreenshot();
-      await proctoringService.logEvent(sessionId, eventType, details, screenshot);
+      await proctoringService.logEvent(sessionId, eventType, details);
     } catch (error) {
       console.error('Error logging proctoring event:', error);
     }

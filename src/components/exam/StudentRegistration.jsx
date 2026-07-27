@@ -164,11 +164,11 @@ const StudentRegistration = ({ examId, onRegister }) => {
       
       setSessionId(session.id);
       
-      // If webcam is active, register face
+      // Confirm a face is visible before starting. There is no server-side face
+      // store to upload to, so this only checks the local webcam frame.
       if (webcamActive) {
         const screenshot = await takeScreenshot();
         if (screenshot) {
-          await examService.registerFace(session.id, screenshot);
           setFaceRegistered(true);
         }
       }

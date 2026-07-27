@@ -36,19 +36,10 @@ export const examService = {
     return response.data.data;
   },
   
-  registerFace: async (sessionId, faceImage) => {
-    const formData = new FormData();
-    formData.append('faceImage', faceImage);
-    
-    const response = await api.post(`/exams/sessions/${sessionId}/face`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    });
-    
-    return response.data.data;
-  },
-  
+  // Face registration and server-side verification are not implemented. There
+  // is no face storage in the schema and no recognition on the server, so face
+  // checks run entirely client-side via face-api.js in useProctoring.
+
   submitAnswer: async (sessionId, questionId, optionId) => {
     const response = await api.post('/exams/answers', { sessionId, questionId, optionId });
     return response.data.data;
@@ -67,38 +58,18 @@ export const examService = {
 
 // Proctoring services
 export const proctoringService = {
-  logEvent: async (sessionId, eventType, details = {}, screenshot = null) => {
-    const formData = new FormData();
-    formData.append('sessionId', sessionId);
-    formData.append('eventType', eventType);
-    formData.append('details', JSON.stringify(details));
-    
-    if (screenshot) {
-      formData.append('screenshot', screenshot);
-    }
-    
-    const response = await api.post('/proctoring/log', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
+  // Sent as JSON: the server parses with express.json() and proctor_logs has
+  // no column for `details` or a screenshot, so neither is uploaded.
+  logEvent: async (sessionId, eventType, details = {}) => {
+    const response = await api.post('/proctoring/log', {
+      sessionId,
+      eventType,
+      details
     });
-    
+
     return response.data.data;
   },
-  
-  verifyFace: async (sessionId, faceImage) => {
-    const formData = new FormData();
-    formData.append('faceImage', faceImage);
-    
-    const response = await api.post(`/proctoring/sessions/${sessionId}/verify-face`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    });
-    
-    return response.data.data;
-  },
-  
+
   getSessionLogs: async (sessionId) => {
     const response = await api.get(`/proctoring/sessions/${sessionId}/logs`);
     return response.data.data;
