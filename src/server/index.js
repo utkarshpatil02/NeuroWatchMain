@@ -42,6 +42,12 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 // Passport strategies
+//
+// Note the use of maybeSingle() over single(): single() reports "no rows" as an
+// error, which makes a missing account indistinguishable from the database
+// being unreachable. Treating both as a bad password reports an outage as
+// "Invalid email or password" and hides it. maybeSingle() returns data: null
+// for no rows, so any error left is a genuine failure and is surfaced as 5xx.
 passport.use('student', new LocalStrategy({
   usernameField: 'email',
   passwordField: 'password'
@@ -51,12 +57,15 @@ passport.use('student', new LocalStrategy({
       .from('students')
       .select('*')
       .eq('email', email)
-      .single();
-    
-    if (error || !data) {
+      .maybeSingle();
+
+    if (error) {
+      return done(error);
+    }
+    if (!data) {
       return done(null, false, { message: 'Invalid email or password' });
     }
-    
+
     const valid = await bcrypt.compare(password, data.password);
     if (!valid) {
       return done(null, false, { message: 'Invalid email or password' });
@@ -77,12 +86,15 @@ passport.use('admin', new LocalStrategy({
       .from('admins')
       .select('*')
       .eq('email', email)
-      .single();
-    
-    if (error || !data) {
+      .maybeSingle();
+
+    if (error) {
+      return done(error);
+    }
+    if (!data) {
       return done(null, false, { message: 'Invalid email or password' });
     }
-    
+
     const valid = await bcrypt.compare(password, data.password);
     if (!valid) {
       return done(null, false, { message: 'Invalid email or password' });
@@ -174,14 +186,18 @@ app.post('/api/signup/admin', async (req, res) => {
 app.post('/api/login/student', async (req, res, next) => {
   const { email, password, exam_code } = req.body;
 
-  // Validate exam code
+  // Validate exam code. Same reasoning as the strategies above: a lookup
+  // failure must not be reported to the student as a bad exam code.
   const { data: exam, error: examError } = await supabase
     .from('exams')
     .select('*')
     .eq('exam_code', exam_code)
-    .single();
+    .maybeSingle();
 
-  if (examError || !exam) {
+  if (examError) {
+    return next(examError);
+  }
+  if (!exam) {
     return res.status(400).json({ error: 'Invalid exam code' });
   }
 
@@ -904,8 +920,23 @@ app.get('/api/exams/:examId', requireAuth, async (req, res) => {
 });
 
 // Error handling middleware
+//
+// Reaching the database can fail outright (project paused, DNS gone, network
+// down). That surfaces as a fetch/network error rather than a database error,
+// and it is worth reporting as 503 so an outage is not mistaken for a bug in
+// the request.
+const isUpstreamUnavailable = (err) => {
+  const text = `${err?.message ?? ''} ${err?.details ?? ''} ${err?.cause?.code ?? ''}`;
+  return /fetch failed|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|ECONNRESET|socket hang up/i.test(text);
+};
+
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error(err.stack || err);
+
+  if (isUpstreamUnavailable(err)) {
+    return res.status(503).json({ error: 'Service temporarily unavailable. Please try again shortly.' });
+  }
+
   res.status(500).json({ error: 'Something went wrong!' });
 });
 
