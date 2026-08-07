@@ -58,13 +58,14 @@ export const examService = {
 
 // Proctoring services
 export const proctoringService = {
-  // Sent as JSON: the server parses with express.json() and proctor_logs has
-  // no column for `details` or a screenshot, so neither is uploaded.
-  logEvent: async (sessionId, eventType, details = {}) => {
+  // Sent as JSON. `screenshot` is an optional image/jpeg data URL; the server
+  // uploads it to a private bucket and stores only the path.
+  logEvent: async (sessionId, eventType, details = {}, screenshot = null) => {
     const response = await api.post('/proctoring/log', {
       sessionId,
       eventType,
-      details
+      details,
+      screenshot
     });
 
     return response.data.data;

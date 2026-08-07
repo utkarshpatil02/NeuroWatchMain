@@ -30,4 +30,13 @@ export default [
       ],
     },
   },
+  {
+    // The server and the standalone test scripts run in Node, not the browser.
+    // Without this they are linted against browser globals, so process, Buffer
+    // and console are all reported as undefined.
+    files: ['src/server/**/*.js', '**/*.test.mjs', '**/*.mjs'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
 ]

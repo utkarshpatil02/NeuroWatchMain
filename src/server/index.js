@@ -15,7 +15,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
-app.use(express.json());
+// Screenshots arrive as base64 data URLs, which inflate by ~4/3. The 1 MB
+// image cap in decodeScreenshot is the real limit; this just has to clear it.
+app.use(express.json({ limit: '2mb' }));
 app.use(cors({ 
   origin: ['http://localhost:3000', 'http://localhost:5173'], 
   credentials: true 
@@ -763,14 +765,37 @@ app.get('/api/exams/sessions/:sessionId/results', requireAuth, async (req, res) 
   }
 });
 
-// Record a proctoring event.
-//
-// proctor_logs only has (session_id, event_type, timestamp), so `details` and
-// any screenshot sent by the client are accepted but not persisted. Storing
-// them needs new columns.
+// Screenshots live in a private bucket; proctor_logs stores only the path.
+// Keeping images out of the table keeps row reads cheap and means access is
+// granted by short-lived signed URLs rather than by whoever can read the row.
+const SCREENSHOT_BUCKET = 'proctor-screenshots';
+const SCREENSHOT_MAX_BYTES = 1024 * 1024;
+const SIGNED_URL_TTL_SECONDS = 300;
+
+// Latched so the "run the migration" warning appears once, not per request.
+let warnedMissingScreenshotColumns = false;
+
+// Accepts a data URL from the client and returns a JPEG buffer, or throws with
+// a message safe to return to the caller.
+const decodeScreenshot = (dataUrl) => {
+  const match = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!match) throw new Error('screenshot must be a base64 image/jpeg data URL');
+
+  const buffer = Buffer.from(match[1], 'base64');
+  if (!buffer.length) throw new Error('screenshot is empty');
+  if (buffer.length > SCREENSHOT_MAX_BYTES) throw new Error('screenshot exceeds 1 MB');
+
+  // JPEG magic number, so a renamed payload of another type is rejected before
+  // it reaches storage.
+  if (buffer[0] !== 0xff || buffer[1] !== 0xd8) throw new Error('screenshot is not a JPEG');
+
+  return buffer;
+};
+
+// Record a proctoring event, optionally with a webcam screenshot.
 app.post('/api/proctoring/log', requireAuth, async (req, res) => {
   try {
-    const { sessionId, eventType } = req.body;
+    const { sessionId, eventType, details, screenshot } = req.body;
 
     if (!sessionId || !eventType) {
       return res.status(400).json({ error: 'sessionId and eventType are required' });
@@ -784,17 +809,78 @@ app.post('/api/proctoring/log', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const { error } = await supabase
+    let screenshotPath = null;
+    if (screenshot) {
+      let buffer;
+      try {
+        buffer = decodeScreenshot(screenshot);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+
+      // Namespaced by session so one student's images cannot be guessed from
+      // another's, and so a session's images can be removed as a unit.
+      const safeType = String(eventType).replace(/[^a-z0-9_-]/gi, '').slice(0, 40);
+      const path = `${session.session_id}/${Date.now()}-${safeType}.jpg`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(SCREENSHOT_BUCKET)
+        .upload(path, buffer, { contentType: 'image/jpeg', upsert: false });
+
+      // A storage failure must not lose the event itself: the log is the
+      // record that matters, the image is supporting evidence.
+      if (uploadError) console.error('Screenshot upload failed:', uploadError.message);
+      else screenshotPath = path;
+    }
+
+    const base = {
+      session_id: session.session_id,
+      event_type: eventType,
+      timestamp: new Date().toISOString()
+    };
+
+    let { error } = await supabase
       .from('proctor_logs')
-      .insert({
-        session_id: session.session_id,
-        event_type: eventType,
-        timestamp: new Date().toISOString()
-      });
+      .insert({ ...base, screenshot_path: screenshotPath, details: details ?? null });
+
+    // Tolerate running against a database where migrations/001 has not been
+    // applied yet: keep recording the event rather than dropping it, and say
+    // so once rather than on every request.
+    if (error && /screenshot_path|details/.test(error.message ?? '')) {
+      if (!warnedMissingScreenshotColumns) {
+        warnedMissingScreenshotColumns = true;
+        console.warn(
+          'proctor_logs is missing screenshot_path/details - run ' +
+          'migrations/001_proctor_logs_screenshots.sql. Logging events without them.'
+        );
+      }
+
+      // The image was uploaded before the insert failed. Nothing will ever
+      // reference it now, so remove it rather than accumulate orphans in the
+      // bucket on every screenshot event.
+      if (screenshotPath) {
+        const { error: cleanupError } = await supabase.storage
+          .from(SCREENSHOT_BUCKET)
+          .remove([screenshotPath]);
+        if (cleanupError) {
+          console.error('Failed to remove orphaned screenshot:', cleanupError.message);
+        }
+        screenshotPath = null;
+      }
+
+      ({ error } = await supabase.from('proctor_logs').insert(base));
+    }
+
+    // Same reasoning if the insert failed for any other reason.
+    if (error && screenshotPath) {
+      await supabase.storage.from(SCREENSHOT_BUCKET).remove([screenshotPath]).catch(() => {});
+    }
 
     if (error) throw error;
 
-    res.status(201).json({ data: { logged: true, eventType } });
+    res.status(201).json({
+      data: { logged: true, eventType, screenshotStored: screenshotPath !== null }
+    });
   } catch (error) {
     console.error('Error logging proctoring event:', error);
     res.status(500).json({ error: 'Error logging proctoring event' });
@@ -813,15 +899,43 @@ app.get('/api/proctoring/sessions/:sessionId/logs', requireAuth, async (req, res
     }
 
     // proctor_logs keys off session_id, not the exam_sessions primary key.
+    // select('*') rather than naming columns, so this still works before
+    // migrations/001 adds screenshot_path and details.
     const { data, error } = await supabase
       .from('proctor_logs')
-      .select('id, session_id, event_type, timestamp')
+      .select('*')
       .eq('session_id', session.session_id)
       .order('timestamp', { ascending: false });
 
     if (error) throw error;
 
-    res.json({ data });
+    // Mint short-lived signed URLs in one batch. The bucket is private, so
+    // these are the only way to view an image, and they expire.
+    const paths = data.map((row) => row.screenshot_path).filter(Boolean);
+    const urlByPath = {};
+
+    if (paths.length) {
+      const { data: signed, error: signError } = await supabase.storage
+        .from(SCREENSHOT_BUCKET)
+        .createSignedUrls(paths, SIGNED_URL_TTL_SECONDS);
+
+      // Losing the URLs must not lose the log itself.
+      if (signError) console.error('Signing screenshot URLs failed:', signError.message);
+      else signed.forEach((s) => { if (!s.error) urlByPath[s.path] = s.signedUrl; });
+    }
+
+    res.json({
+      data: data.map((row) => ({
+        id: row.id,
+        sessionId: row.session_id,
+        eventType: row.event_type,
+        timestamp: row.timestamp,
+        details: row.details,
+        hasScreenshot: Boolean(row.screenshot_path),
+        // Expires in SIGNED_URL_TTL_SECONDS; re-fetch this endpoint for a new one.
+        screenshotUrl: row.screenshot_path ? urlByPath[row.screenshot_path] ?? null : null
+      }))
+    });
   } catch (error) {
     console.error('Error fetching session logs:', error);
     res.status(500).json({ error: 'Error fetching session logs' });

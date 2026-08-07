@@ -10,6 +10,16 @@ import {
   estimateGazeWithBaseline,
 } from '../utils/gaze';
 
+// Screenshot capture policy. Images are personal data and are retained for as
+// long as the logs are, so capture is deliberately narrow: only events a
+// proctor would actually want to see a frame for, at a bounded rate.
+const SCREENSHOT = {
+  eventTypes: ['multiple_faces', 'face_not_detected', 'gaze_away'],
+  minIntervalMs: 10000,
+  maxWidth: 480,
+  quality: 0.6,
+};
+
 export const useProctoring = (sessionId) => {
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [tabFocused, setTabFocused] = useState(true);
@@ -32,6 +42,7 @@ export const useProctoring = (sessionId) => {
   const gazeStreakRef = useRef(0);
   const gazeStateRef = useRef('normal');
   const lastGazeWarnRef = useRef(0);
+  const lastScreenshotRef = useRef(0);
 
   // 'calibrating' until enough baseline samples are collected, then 'ready'.
   // No gaze verdict is issued while calibrating.
@@ -153,6 +164,22 @@ export const useProctoring = (sessionId) => {
     return new Promise((resolve) => {
       canvas.toBlob(resolve, 'image/jpeg', 0.8);
     });
+  };
+
+  // Screenshot as a data URL for upload, downscaled and compressed. The full
+  // webcam frame is larger than a proctor needs, and every extra kilobyte is
+  // stored per event and retained for as long as the logs are.
+  const screenshotDataUrl = () => {
+    const video = webcamRef.current;
+    if (!video?.videoWidth) return null;
+
+    const scale = Math.min(1, SCREENSHOT.maxWidth / video.videoWidth);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    return canvas.toDataURL('image/jpeg', SCREENSHOT.quality);
   };
 
   // Confirm a face is visible before the exam starts. There is no server-side
@@ -339,11 +366,31 @@ export const useProctoring = (sessionId) => {
     }
   };
 
-  // Log proctoring event
+  // Log proctoring event, attaching a webcam screenshot where one is useful.
+  //
+  // Not every event warrants an image. face_not_detected alone accounts for
+  // most logged events, so capturing on all of them would store thousands of
+  // near-identical frames per exam and retain far more of a student's face
+  // than the evidence justifies. Only visual events carry an image, and only
+  // one every SCREENSHOT.minIntervalMs.
   const logProctoringEvent = async (eventType, details = {}) => {
     if (!sessionId) return;
+
+    let screenshot = null;
+    if (SCREENSHOT.eventTypes.includes(eventType)) {
+      const now = Date.now();
+      if (now - lastScreenshotRef.current >= SCREENSHOT.minIntervalMs) {
+        lastScreenshotRef.current = now;
+        try {
+          screenshot = screenshotDataUrl();
+        } catch (err) {
+          console.error('Screenshot capture failed:', err);
+        }
+      }
+    }
+
     try {
-      await proctoringService.logEvent(sessionId, eventType, details);
+      await proctoringService.logEvent(sessionId, eventType, details, screenshot);
     } catch (error) {
       console.error('Error logging proctoring event:', error);
     }
