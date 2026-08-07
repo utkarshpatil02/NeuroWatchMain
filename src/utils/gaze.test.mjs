@@ -1,5 +1,5 @@
 ﻿// Exercises the real gaze functions from src/utils/gaze.js.
-import { GAZE, headYaw, pupilOffset, estimateGaze } from './gaze.js';
+import { GAZE, headYaw, pupilOffset, estimateGaze, gazeReading, suggestThreshold } from './gaze.js';
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail = '') => {
@@ -70,6 +70,39 @@ check('head turned -> suspicious', estimateGaze(makeLandmarks(20, eyeBox(10, 10)
 check('head straight, pupils sideways -> suspicious', estimateGaze(eyesFwd, makeCtx(0.9)) === 'suspicious');
 check('eyes unreadable -> null (no claim)', estimateGaze(eyesFwd, makeCtx(0.5, { flat: true })) === null);
 check('no canvas -> falls back to yaw only', estimateGaze(eyesFwd, null) === 'normal');
+
+console.log('\nRAW READINGS');
+console.log('-'.repeat(72));
+const r1 = gazeReading(eyesFwd, makeCtx(0.5));
+check('reading exposes yaw + pupil', Number.isFinite(r1.yaw) && Number.isFinite(r1.pupil), `yaw=${r1.yaw.toFixed(3)} pupil=${r1.pupil.toFixed(3)}`);
+const r2 = gazeReading(eyesFwd, makeCtx(0.5, { flat: true }));
+check('unreadable eyes -> pupil null', r2.pupil === null);
+const r3 = gazeReading(eyesFwd, null);
+check('no canvas -> pupil null, yaw still read', r3.pupil === null && Number.isFinite(r3.yaw));
+
+console.log('\nTHRESHOLD SUGGESTION');
+console.log('-'.repeat(72));
+// Cleanly separable: on-screen clusters near 0, away clusters near 0.4
+const clean = suggestThreshold(
+  [0.01, 0.02, 0.03, 0.02, 0.04, 0.01, 0.02, 0.03],
+  [0.38, 0.42, 0.40, 0.45, 0.39, 0.41, 0.44, 0.43],
+);
+check('separable data -> threshold between clusters', clean.threshold > 0.05 && clean.threshold < 0.38, `t=${clean.threshold.toFixed(3)}`);
+check('separable data -> perfect separation', clean.tpr === 1 && clean.fpr === 0, `tpr=${clean.tpr} fpr=${clean.fpr}`);
+
+// Overlapping data: J should be low, signalling a weak signal
+const overlap = suggestThreshold(
+  [0.10, 0.20, 0.30, 0.15, 0.25, 0.18, 0.22, 0.28],
+  [0.12, 0.22, 0.28, 0.16, 0.24, 0.19, 0.21, 0.26],
+);
+check('overlapping data -> low J (weak signal)', overlap.j < 0.5, `J=${overlap.j.toFixed(2)}`);
+
+check('sign is ignored (uses magnitude)',
+  suggestThreshold([0.01, -0.02, 0.03, -0.02, 0.01], [-0.40, 0.42, -0.41, 0.44, -0.39]).tpr === 1);
+check('too few samples -> null', suggestThreshold([0.1, 0.2], [0.5, 0.6]) === null);
+check('non-finite values ignored', suggestThreshold(
+  [0.01, 0.02, 0.03, 0.02, 0.04, NaN, null],
+  [0.40, 0.42, 0.41, 0.44, 0.39, undefined]) !== null);
 
 console.log('\n' + '='.repeat(72));
 console.log(`${pass} passed, ${fail} failed`);

@@ -94,19 +94,58 @@ export const pupilOffset = (ctx, eyePoints) => {
   return weightedX / weightTotal / (w - 1) - 0.5;
 };
 
-// Combines both signals into 'normal' | 'suspicious', or null when the frame
-// carries no usable evidence.
-export const estimateGaze = (landmarks, ctx) => {
+// Raw signals for one frame, before any thresholding. `pupil` is the mean of
+// whichever eyes were readable, or null when neither was. Exposed so the
+// tuner can record real measurements instead of just verdicts.
+export const gazeReading = (landmarks, ctx) => {
   const yaw = headYaw(landmarks);
-  if (Math.abs(yaw) > GAZE.yawTolerance) return 'suspicious';
-
-  if (!ctx) return 'normal';
+  if (!ctx) return { yaw, pupil: null };
 
   const left = pupilOffset(ctx, landmarks.getLeftEye());
   const right = pupilOffset(ctx, landmarks.getRightEye());
   const readings = [left, right].filter((v) => v !== null);
-  if (!readings.length) return null; // eyes unreadable this frame
 
-  const avg = readings.reduce((s, v) => s + v, 0) / readings.length;
-  return Math.abs(avg) > GAZE.pupilTolerance ? 'suspicious' : 'normal';
+  return {
+    yaw,
+    pupil: readings.length
+      ? readings.reduce((s, v) => s + v, 0) / readings.length
+      : null,
+    left,
+    right,
+  };
+};
+
+// Combines both signals into 'normal' | 'suspicious', or null when the frame
+// carries no usable evidence.
+export const estimateGaze = (landmarks, ctx) => {
+  const { yaw, pupil } = gazeReading(landmarks, ctx);
+
+  if (Math.abs(yaw) > GAZE.yawTolerance) return 'suspicious';
+  if (!ctx) return 'normal';
+  if (pupil === null) return null; // eyes unreadable this frame
+
+  return Math.abs(pupil) > GAZE.pupilTolerance ? 'suspicious' : 'normal';
+};
+
+// Given labelled |value| samples, pick the threshold that best separates them.
+// Sweeps candidate cut points and maximises Youden's J (TPR - FPR), so it
+// favours catching real look-aways without flagging normal behaviour.
+export const suggestThreshold = (onScreen, away) => {
+  const pos = away.filter((v) => Number.isFinite(v)).map(Math.abs);
+  const neg = onScreen.filter((v) => Number.isFinite(v)).map(Math.abs);
+  if (pos.length < 5 || neg.length < 5) return null;
+
+  const candidates = [...new Set([...pos, ...neg])].sort((a, b) => a - b);
+  let best = null;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const next = candidates[i + 1] ?? candidates[i] + 0.01;
+    const t = (candidates[i] + next) / 2;
+    const tpr = pos.filter((v) => v > t).length / pos.length;
+    const fpr = neg.filter((v) => v > t).length / neg.length;
+    const j = tpr - fpr;
+    if (!best || j > best.j) best = { threshold: t, tpr, fpr, j };
+  }
+
+  return best;
 };
