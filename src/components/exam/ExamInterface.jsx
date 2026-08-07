@@ -134,6 +134,7 @@ const {
   faceDetected,
   multipleFaces,
   eyeMovement,
+  gazeCalibration,
   warnings,
   webcamRef,
   requestFullScreen,
@@ -638,18 +639,21 @@ useEffect(() => {
             </StatusText>
           </StatusItem>
 
-          {/* 'unavailable' means the landmark model did not load, so no claim
+          {/* Gaze is only judged once a per-student baseline exists.
+              'unavailable' means the landmark model did not load, so no claim
               is made about gaze either way. */}
           <StatusItem status={eyeMovement === 'suspicious' ? 'error' : 'ok'}>
             <StatusIcon status={eyeMovement === 'suspicious' ? 'error' : 'ok'}>
               {eyeMovement === 'suspicious' ? <FiAlertCircle size={18} /> : <FiCheckCircle size={18} />}
             </StatusIcon>
             <StatusText>
-              {eyeMovement === 'unavailable'
+              {gazeCalibration === 'unavailable'
                 ? 'Gaze tracking unavailable'
-                : eyeMovement === 'suspicious'
-                  ? 'Looking away from screen'
-                  : 'Gaze on screen'}
+                : gazeCalibration === 'calibrating'
+                  ? 'Calibrating gaze tracking…'
+                  : eyeMovement === 'suspicious'
+                    ? 'Looking away from screen'
+                    : 'Gaze on screen'}
             </StatusText>
           </StatusItem>
 

@@ -1,5 +1,8 @@
 ﻿// Exercises the real gaze functions from src/utils/gaze.js.
-import { GAZE, headYaw, pupilOffset, estimateGaze, gazeReading, suggestThreshold } from './gaze.js';
+import {
+  GAZE, CALIBRATION, headYaw, pupilOffset, estimateGaze, gazeReading,
+  suggestThreshold, median, mad, buildBaseline, estimateGazeWithBaseline,
+} from './gaze.js';
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail = '') => {
@@ -103,6 +106,67 @@ check('too few samples -> null', suggestThreshold([0.1, 0.2], [0.5, 0.6]) === nu
 check('non-finite values ignored', suggestThreshold(
   [0.01, 0.02, 0.03, 0.02, 0.04, NaN, null],
   [0.40, 0.42, 0.41, 0.44, 0.39, undefined]) !== null);
+
+console.log('\nROBUST STATISTICS');
+console.log('-'.repeat(72));
+check('median, odd count', median([3, 1, 2]) === 2);
+check('median, even count', median([4, 1, 2, 3]) === 2.5);
+check('median ignores non-finite', median([1, 2, 3, NaN, null]) === 2);
+check('median of nothing -> null', median([]) === null);
+check('mad of a constant series -> 0', mad([5, 5, 5, 5]) === 0);
+check('mad resists an outlier', mad([1, 1, 1, 1, 99]) === 0, 'a mean-based spread would blow up here');
+
+console.log('\nBASELINE BUILDING');
+console.log('-'.repeat(72));
+const steady = (n, yaw, pupil) => Array.from({ length: n }, (_, i) => ({
+  yaw: yaw + (i % 2 ? 0.01 : -0.01),
+  pupil: pupil === null ? null : pupil + (i % 2 ? 0.01 : -0.01),
+}));
+
+check('too few samples -> null', buildBaseline(steady(10, 0, 0)) === null);
+
+// A camera mounted off to one side: baseline yaw is not zero.
+const offAxis = buildBaseline(steady(120, 0.30, 0.02));
+check('off-axis camera -> centre follows the student', Math.abs(offAxis.yawCenter - 0.30) < 0.02, `yawCenter=${offAxis.yawCenter.toFixed(3)}`);
+check('very still student -> tolerance clamped to floor', offAxis.yawTolerance === CALIBRATION.yawFloor, `tol=${offAxis.yawTolerance}`);
+
+// A restless student: spread is large, tolerance must not exceed the ceiling.
+const restless = buildBaseline(Array.from({ length: 120 }, (_, i) => ({
+  yaw: (i % 7) * 0.12 - 0.36, pupil: (i % 5) * 0.09 - 0.18,
+})));
+check('restless student -> tolerance clamped to ceiling', restless.yawTolerance === CALIBRATION.yawCeil, `tol=${restless.yawTolerance}`);
+
+// Unreadable irises throughout: pupil baseline must be withheld, not invented.
+const noPupils = buildBaseline(steady(120, 0, null));
+check('no readable pupils -> pupil baseline null', noPupils.pupilCenter === null && noPupils.pupilTolerance === null);
+check('yaw baseline still built', Number.isFinite(noPupils.yawCenter));
+
+console.log('\nVERDICT AGAINST A BASELINE');
+console.log('-'.repeat(72));
+// Student normally sits at yaw 0.30. A fixed global threshold (0.22) would
+// flag them permanently; their own baseline should not.
+const offAxisLandmarks = makeLandmarks(50 + 0.30 * 50, eyeBox(10, 10), eyeBox(40, 10));
+check('off-axis student flagged by the FIXED threshold',
+  estimateGaze(offAxisLandmarks, makeCtx(0.5)) === 'suspicious',
+  `yaw=${headYaw(offAxisLandmarks).toFixed(3)} vs global ${GAZE.yawTolerance}`);
+check('off-axis student NOT flagged against their own baseline',
+  estimateGazeWithBaseline(offAxisLandmarks, makeCtx(0.5), offAxis) === 'normal');
+
+// The same student genuinely turning further away should still be caught.
+const turnedFurther = makeLandmarks(50 + 0.55 * 50, eyeBox(10, 10), eyeBox(40, 10));
+check('same student turning further -> suspicious',
+  estimateGazeWithBaseline(turnedFurther, makeCtx(0.5), offAxis) === 'suspicious',
+  `yaw=${headYaw(turnedFurther).toFixed(3)}`);
+
+check('no baseline -> falls back to global constants',
+  estimateGazeWithBaseline(eyesFwd, makeCtx(0.5), null) === estimateGaze(eyesFwd, makeCtx(0.5)));
+// Must sit AT the baseline centre, so yaw passes and the pupil check is what
+// decides. Using forward-facing landmarks here would be a 0.30 yaw deviation
+// from this student's baseline and get flagged before pupils are consulted.
+check('unreadable eyes -> null even with a baseline',
+  estimateGazeWithBaseline(offAxisLandmarks, makeCtx(0.5, { flat: true }), offAxis) === null);
+check('at baseline centre with readable eyes -> normal',
+  estimateGazeWithBaseline(offAxisLandmarks, makeCtx(0.5), offAxis) === 'normal');
 
 console.log('\n' + '='.repeat(72));
 console.log(`${pass} passed, ${fail} failed`);

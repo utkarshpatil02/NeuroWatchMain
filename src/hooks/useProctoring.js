@@ -2,7 +2,13 @@ import { useState, useEffect, useRef } from 'react';
 import { proctoringService } from '../services/api';
 import * as faceapi from 'face-api.js';
 
-import { GAZE, estimateGaze } from '../utils/gaze';
+import {
+  GAZE,
+  CALIBRATION,
+  gazeReading,
+  buildBaseline,
+  estimateGazeWithBaseline,
+} from '../utils/gaze';
 
 export const useProctoring = (sessionId) => {
   const [isFullScreen, setIsFullScreen] = useState(false);
@@ -26,6 +32,12 @@ export const useProctoring = (sessionId) => {
   const gazeStreakRef = useRef(0);
   const gazeStateRef = useRef('normal');
   const lastGazeWarnRef = useRef(0);
+
+  // 'calibrating' until enough baseline samples are collected, then 'ready'.
+  // No gaze verdict is issued while calibrating.
+  const [gazeCalibration, setGazeCalibration] = useState('calibrating');
+  const calibrationSamplesRef = useRef([]);
+  const baselineRef = useRef(null);
 
   // Join exam session for real-time updates
   useEffect(() => {
@@ -242,6 +254,7 @@ export const useProctoring = (sessionId) => {
 
       if (!useLandmarks) {
         setEyeMovement('unavailable');
+        setGazeCalibration('unavailable');
         return;
       }
 
@@ -252,7 +265,31 @@ export const useProctoring = (sessionId) => {
       }
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      const verdict = estimateGaze(detections[0].landmarks, ctx);
+      const landmarks = detections[0].landmarks;
+
+      // Calibration phase: the student is reading instructions and presumed to
+      // be looking at the screen, so these frames define their normal. No
+      // verdict is issued yet - judging someone against a baseline that does
+      // not exist is what the fixed global thresholds did.
+      if (!baselineRef.current) {
+        calibrationSamplesRef.current.push(gazeReading(landmarks, ctx));
+
+        if (calibrationSamplesRef.current.length >= CALIBRATION.targetSamples) {
+          const baseline = buildBaseline(calibrationSamplesRef.current);
+          if (baseline) {
+            baselineRef.current = baseline;
+            calibrationSamplesRef.current = [];
+            setGazeCalibration('ready');
+          } else {
+            // Not enough usable frames; keep the most recent ones and retry.
+            calibrationSamplesRef.current =
+              calibrationSamplesRef.current.slice(-CALIBRATION.minSamples);
+          }
+        }
+        return;
+      }
+
+      const verdict = estimateGazeWithBaseline(landmarks, ctx, baselineRef.current);
       if (verdict === null) return; // unreadable frame: leave the streak alone
 
       applyGazeVerdict(verdict);
@@ -424,6 +461,7 @@ export const useProctoring = (sessionId) => {
     faceDetected,
     multipleFaces,
     eyeMovement,
+    gazeCalibration,
     faceVerified,
     webcamRef,
     requestFullScreen,

@@ -127,6 +127,99 @@ export const estimateGaze = (landmarks, ctx) => {
   return Math.abs(pupil) > GAZE.pupilTolerance ? 'suspicious' : 'normal';
 };
 
+// --- Per-student calibration ----------------------------------------------
+//
+// A single global threshold is fragile: it has to hold for a dim laptop webcam
+// and a bright external one, for someone sitting close and someone leaning
+// back, with and without glasses. A camera mounted off to one side also gives
+// a permanently non-zero yaw, which a fixed threshold reads as looking away.
+//
+// Instead, measure each student's own baseline at the start of the session,
+// while they are reading instructions and presumed to be looking at the
+// screen, then flag deviation from *their* baseline.
+export const CALIBRATION = {
+  minSamples: 40,     // ~8s at GAZE.detectIntervalMs before a baseline is usable
+  targetSamples: 100, // ~20s; collection stops here
+  k: 4,               // flag beyond k x the student's own spread
+  yawFloor: 0.10,     // never tighter than this, however still they sat
+  yawCeil: 0.35,      // never looser than this, however much they moved
+  pupilFloor: 0.08,
+  pupilCeil: 0.30,
+};
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+export const median = (values) => {
+  const v = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+};
+
+// Median absolute deviation: a spread measure that a few glances away during
+// calibration cannot drag around, unlike a standard deviation.
+export const mad = (values, center = null) => {
+  const v = values.filter(Number.isFinite);
+  if (!v.length) return null;
+  const c = center === null ? median(v) : center;
+  return median(v.map((x) => Math.abs(x - c)));
+};
+
+// Turn collected calibration samples into per-student centres and tolerances.
+// Returns null when there is not enough data to justify one.
+export const buildBaseline = (samples) => {
+  const yaws = samples.map((s) => s.yaw).filter(Number.isFinite);
+  if (yaws.length < CALIBRATION.minSamples) return null;
+
+  const yawCenter = median(yaws);
+  const yawTolerance = clamp(
+    CALIBRATION.k * (mad(yaws, yawCenter) ?? 0),
+    CALIBRATION.yawFloor,
+    CALIBRATION.yawCeil,
+  );
+
+  // The iris is often unreadable for a fair share of frames. Only derive a
+  // pupil baseline when enough of them came through; otherwise fall back.
+  const pupils = samples.map((s) => s.pupil).filter(Number.isFinite);
+  let pupilCenter = null;
+  let pupilTolerance = null;
+  if (pupils.length >= CALIBRATION.minSamples / 2) {
+    pupilCenter = median(pupils);
+    pupilTolerance = clamp(
+      CALIBRATION.k * (mad(pupils, pupilCenter) ?? 0),
+      CALIBRATION.pupilFloor,
+      CALIBRATION.pupilCeil,
+    );
+  }
+
+  return {
+    yawCenter,
+    yawTolerance,
+    pupilCenter,
+    pupilTolerance,
+    samples: yaws.length,
+    pupilSamples: pupils.length,
+  };
+};
+
+// Same verdict logic as estimateGaze, but measured against the student's own
+// baseline. Falls back to the global constants for anything not calibrated,
+// so this is safe to call before or without calibration.
+export const estimateGazeWithBaseline = (landmarks, ctx, baseline) => {
+  const { yaw, pupil } = gazeReading(landmarks, ctx);
+
+  const yawCenter = baseline?.yawCenter ?? 0;
+  const yawTolerance = baseline?.yawTolerance ?? GAZE.yawTolerance;
+  if (Math.abs(yaw - yawCenter) > yawTolerance) return 'suspicious';
+
+  if (!ctx) return 'normal';
+  if (pupil === null) return null;
+
+  const pupilCenter = baseline?.pupilCenter ?? 0;
+  const pupilTolerance = baseline?.pupilTolerance ?? GAZE.pupilTolerance;
+  return Math.abs(pupil - pupilCenter) > pupilTolerance ? 'suspicious' : 'normal';
+};
+
 // Given labelled |value| samples, pick the threshold that best separates them.
 // Sweeps candidate cut points and maximises Youden's J (TPR - FPR), so it
 // favours catching real look-aways without flagging normal behaviour.
