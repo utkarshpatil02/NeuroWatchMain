@@ -2,21 +2,30 @@ import { useState, useEffect, useRef } from 'react';
 import { proctoringService } from '../services/api';
 import * as faceapi from 'face-api.js';
 
+import { GAZE, estimateGaze } from '../utils/gaze';
+
 export const useProctoring = (sessionId) => {
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [tabFocused, setTabFocused] = useState(true);
   const [warnings, setWarnings] = useState([]);
   const [faceDetected, setFaceDetected] = useState(true);
   const [multipleFaces, setMultipleFaces] = useState(false);
-  // Eye-movement tracking is not implemented, so this stays 'normal'. Kept in
-  // state because consumers read it; add a setter back when tracking lands.
-  const [eyeMovement] = useState('normal');
+  // 'normal' | 'suspicious' | 'unavailable'. 'unavailable' means the landmark
+  // model did not load, so no claim is made either way.
+  const [eyeMovement, setEyeMovement] = useState('normal');
   const [faceVerified, setFaceVerified] = useState(false);
 
   const webcamRef = useRef(null);
   const streamRef = useRef(null);
   const faceCheckIntervalRef = useRef(null);
   const faceApiLoadedRef = useRef(false);
+  const landmarksLoadedRef = useRef(false);
+
+  // Gaze is debounced over consecutive frames: people glance away constantly
+  // while thinking, so a single off-screen frame must not raise a warning.
+  const gazeStreakRef = useRef(0);
+  const gazeStateRef = useRef('normal');
+  const lastGazeWarnRef = useRef(0);
 
   // Join exam session for real-time updates
   useEffect(() => {
@@ -25,7 +34,9 @@ export const useProctoring = (sessionId) => {
     }
   }, [sessionId]);
 
-  // Load face-api.js models once
+  // Load face-api.js models once. The landmark net is what makes gaze
+  // estimation possible; without it detection still runs, but eyeMovement
+  // stays 'normal' rather than silently reporting everyone as attentive.
   useEffect(() => {
     const loadModels = async () => {
       try {
@@ -34,6 +45,15 @@ export const useProctoring = (sessionId) => {
       } catch (err) {
         console.error('Error loading face-api.js models:', err);
         addWarning('Face detection models failed to load');
+        return;
+      }
+
+      try {
+        await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
+        landmarksLoadedRef.current = true;
+      } catch (err) {
+        console.error('Error loading face landmark model:', err);
+        addWarning('Gaze tracking unavailable (landmark model failed to load)');
       }
     };
     loadModels();
@@ -140,38 +160,129 @@ export const useProctoring = (sessionId) => {
     }
   };
 
-  // Real-time face detection using face-api.js
+  // Clear the gaze streak when there is nothing to judge (no face, or more
+  // than one). Absence of a reading is not evidence of looking away.
+  const resetGaze = () => {
+    gazeStreakRef.current = 0;
+    if (gazeStateRef.current !== 'normal') {
+      gazeStateRef.current = 'normal';
+      setEyeMovement('normal');
+    }
+  };
+
+  // Fold one frame's verdict into the debounced state. Only a run of
+  // consecutive agreeing frames flips it, so a glance does not trigger.
+  const applyGazeVerdict = (verdict) => {
+    const current = gazeStateRef.current;
+
+    if (verdict === current) {
+      gazeStreakRef.current = 0;
+      return;
+    }
+
+    gazeStreakRef.current += 1;
+
+    const needed =
+      verdict === 'suspicious' ? GAZE.framesToTrigger : GAZE.framesToClear;
+    if (gazeStreakRef.current < needed) return;
+
+    gazeStreakRef.current = 0;
+    gazeStateRef.current = verdict;
+    setEyeMovement(verdict);
+
+    if (verdict !== 'suspicious') return;
+
+    // Rate-limit the visible warning and the logged event separately from the
+    // state, which flips as often as the student looks back and away.
+    const now = Date.now();
+    if (now - lastGazeWarnRef.current < GAZE.warnCooldownMs) return;
+    lastGazeWarnRef.current = now;
+
+    addWarning('Looking away from the screen was detected.');
+    logProctoringEvent('gaze_away');
+  };
+
+  // Real-time face detection using face-api.js.
+  //
+  // Throttled to GAZE.detectIntervalMs. This previously ran a full detection
+  // every animation frame and pushed a warning on each one, which pegged the
+  // CPU and grew the warnings list without bound; landmark extraction on top
+  // of that would be far worse.
   useEffect(() => {
     let animationFrameId;
-    const detectFaces = async () => {
-      if (
-        webcamRef.current &&
-        webcamRef.current.readyState === 4 &&
-        faceApiLoadedRef.current
-      ) {
-        try {
-          const detections = await faceapi.detectAllFaces(
-            webcamRef.current,
-            new faceapi.TinyFaceDetectorOptions()
-          );
-          setFaceDetected(detections.length === 1);
-          setMultipleFaces(detections.length > 1);
+    let cancelled = false;
+    let lastRun = 0;
+    let busy = false;
 
-          // Optionally, add warnings (debounced)
-          if (detections.length === 0) {
-            addWarning("Face not detected. Please ensure your face is visible.");
-          } else if (detections.length > 1) {
-            addWarning("Multiple faces detected. Only the exam taker should be visible.");
-          }
-        } catch (err) {
-          console.error('Face detection error:', err);
-        }
+    // Reused scratch canvas for reading eye pixels.
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    const runDetection = async (video) => {
+      const useLandmarks = landmarksLoadedRef.current;
+
+      const query = faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions());
+      const detections = useLandmarks ? await query.withFaceLandmarks() : await query;
+
+      if (cancelled) return;
+
+      setFaceDetected(detections.length === 1);
+      setMultipleFaces(detections.length > 1);
+
+      if (detections.length === 0) {
+        addWarning('Face not detected. Please ensure your face is visible.');
+        resetGaze();
+        return;
       }
-      animationFrameId = requestAnimationFrame(detectFaces);
+      if (detections.length > 1) {
+        addWarning('Multiple faces detected. Only the exam taker should be visible.');
+        resetGaze();
+        return;
+      }
+
+      if (!useLandmarks) {
+        setEyeMovement('unavailable');
+        return;
+      }
+
+      // Copy the current frame so eye regions can be sampled.
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const verdict = estimateGaze(detections[0].landmarks, ctx);
+      if (verdict === null) return; // unreadable frame: leave the streak alone
+
+      applyGazeVerdict(verdict);
     };
 
-    detectFaces();
+    const tick = async (now) => {
+      if (cancelled) return;
+
+      const video = webcamRef.current;
+      const ready = video && video.readyState === 4 && faceApiLoadedRef.current;
+
+      if (ready && !busy && now - lastRun >= GAZE.detectIntervalMs) {
+        lastRun = now;
+        busy = true;
+        try {
+          await runDetection(video);
+        } catch (err) {
+          console.error('Face detection error:', err);
+        } finally {
+          busy = false;
+        }
+      }
+
+      animationFrameId = requestAnimationFrame(tick);
+    };
+
+    animationFrameId = requestAnimationFrame(tick);
+
     return () => {
+      cancelled = true;
       if (animationFrameId) cancelAnimationFrame(animationFrameId);
     };
     // eslint-disable-next-line

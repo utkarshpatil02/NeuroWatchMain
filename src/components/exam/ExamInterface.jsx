@@ -128,11 +128,12 @@ const ExamInterface = () => {
   const location = useLocation();
   const { exam: examData, sessionId } = location.state || {};
   const lastLogTime = useRef({});
-const { 
-  isFullScreen, 
-  tabFocused, 
+const {
+  isFullScreen,
+  tabFocused,
   faceDetected,
   multipleFaces,
+  eyeMovement,
   warnings,
   webcamRef,
   requestFullScreen,
@@ -636,7 +637,23 @@ useEffect(() => {
               {!multipleFaces ? 'Single person detected' : 'Multiple people detected'}
             </StatusText>
           </StatusItem>
-          
+
+          {/* 'unavailable' means the landmark model did not load, so no claim
+              is made about gaze either way. */}
+          <StatusItem status={eyeMovement === 'suspicious' ? 'error' : 'ok'}>
+            <StatusIcon status={eyeMovement === 'suspicious' ? 'error' : 'ok'}>
+              {eyeMovement === 'suspicious' ? <FiAlertCircle size={18} /> : <FiCheckCircle size={18} />}
+            </StatusIcon>
+            <StatusText>
+              {eyeMovement === 'unavailable'
+                ? 'Gaze tracking unavailable'
+                : eyeMovement === 'suspicious'
+                  ? 'Looking away from screen'
+                  : 'Gaze on screen'}
+            </StatusText>
+          </StatusItem>
+
+
           {warnings.length > 0 && (
             <div style={{ marginTop: '20px' }}>
               <h4>Recent Warnings ({warnings.length})</h4>
