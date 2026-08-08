@@ -9,6 +9,7 @@ import bcrypt from 'bcryptjs';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
+import { FACE, computeFaceDescriptor, matchDescriptors } from './faceRecognition.js';
 
 // Load .env from this directory, not the process working directory
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -884,6 +885,128 @@ app.post('/api/proctoring/log', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error logging proctoring event:', error);
     res.status(500).json({ error: 'Error logging proctoring event' });
+  }
+});
+
+// Enrol the reference face for a session.
+//
+// Called once at exam start. The frame is decoded and described server-side;
+// a descriptor computed in the browser would be trivially forgeable, which
+// would make the whole check theatre.
+app.post('/api/proctoring/sessions/:sessionId/face', requireAuth, async (req, res) => {
+  try {
+    const session = await loadSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (!canAccessSession(req.user, session)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    let buffer;
+    try {
+      buffer = decodeScreenshot(req.body?.image);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    let face;
+    try {
+      face = await computeFaceDescriptor(buffer);
+    } catch (err) {
+      console.error('Face descriptor failed:', err.message);
+      return res.status(503).json({ error: 'Face recognition is unavailable' });
+    }
+
+    if (!face) {
+      return res.status(422).json({
+        error: 'No clearly visible face in the frame. Face the camera in good light and retry.',
+      });
+    }
+
+    const { error } = await supabase
+      .from('exam_sessions')
+      .update({
+        face_descriptor: face.descriptor,
+        face_enrolled_at: new Date().toISOString(),
+      })
+      .eq('id', session.id);
+
+    if (error && /face_descriptor|face_enrolled_at/.test(error.message ?? '')) {
+      return res.status(503).json({
+        error: 'Face enrolment is not set up. Run migrations/002_exam_sessions_face_descriptor.sql.',
+      });
+    }
+    if (error) throw error;
+
+    // The descriptor itself is never returned; the client has no use for it
+    // and it is biometric data.
+    res.status(201).json({ data: { enrolled: true, detectionScore: face.score } });
+  } catch (error) {
+    console.error('Error enrolling face:', error);
+    res.status(500).json({ error: 'Error enrolling face' });
+  }
+});
+
+// Verify a later frame against the session's enrolled reference.
+app.post('/api/proctoring/sessions/:sessionId/verify-face', requireAuth, async (req, res) => {
+  try {
+    const session = await loadSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (!canAccessSession(req.user, session)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const { data: row, error: refError } = await supabase
+      .from('exam_sessions')
+      .select('face_descriptor')
+      .eq('id', session.id)
+      .maybeSingle();
+
+    if (refError && /face_descriptor/.test(refError.message ?? '')) {
+      return res.status(503).json({
+        error: 'Face verification is not set up. Run migrations/002_exam_sessions_face_descriptor.sql.',
+      });
+    }
+    if (refError) throw refError;
+
+    if (!row?.face_descriptor) {
+      return res.status(409).json({ error: 'No reference face enrolled for this session' });
+    }
+
+    let buffer;
+    try {
+      buffer = decodeScreenshot(req.body?.image);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    let face;
+    try {
+      face = await computeFaceDescriptor(buffer);
+    } catch (err) {
+      console.error('Face descriptor failed:', err.message);
+      return res.status(503).json({ error: 'Face recognition is unavailable' });
+    }
+
+    // No face is not the same as a mismatched face, and must not be reported
+    // as one: a student who leaned out of frame has not been impersonated.
+    if (!face) {
+      return res.json({ data: { faceDetected: false, matched: null, distance: null } });
+    }
+
+    const { matched, distance } = matchDescriptors(row.face_descriptor, face.descriptor);
+
+    res.json({
+      data: {
+        faceDetected: true,
+        matched,
+        distance,
+        threshold: FACE.matchThreshold,
+        detectionScore: face.score,
+      },
+    });
+  } catch (error) {
+    console.error('Error verifying face:', error);
+    res.status(500).json({ error: 'Error verifying face' });
   }
 });
 

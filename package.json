@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "test": "npm run test:gaze && npm run test:face",
     "test:gaze": "node src/utils/gaze.test.mjs",
+    "test:face": "node src/server/faceRecognition.test.mjs",
     "preview": "vite preview",
     "server": "node src/server/index.js"
   },
@@ -23,6 +25,7 @@
     "express-session": "^1.18.1",
     "face-api.js": "^0.22.2",
     "framer-motion": "^12.9.4",
+    "jpeg-js": "^0.4.4",
     "lottie-react": "^2.4.1",
     "passport": "^0.7.0",
     "passport-local": "^1.0.0",

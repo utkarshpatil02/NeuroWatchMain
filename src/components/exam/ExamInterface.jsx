@@ -135,10 +135,13 @@ const {
   multipleFaces,
   eyeMovement,
   gazeCalibration,
+  faceMatch,
   warnings,
   webcamRef,
   requestFullScreen,
-  startWebcam
+  startWebcam,
+  registerFace,
+  startFaceVerification
 } = useProctoring(sessionId);
 
   // Fetch exam questions
@@ -235,13 +238,24 @@ const handleSubmit = async () => {
         if (!success) {
           console.warn("Failed to initialize webcam");
           setCameraError(true);
+          return;
         }
+
+        // Enrol the reference face once the camera has settled, then start
+        // polling that the same person is still there. Enrolment needs a
+        // frame with a clearly visible face, so give the video a moment to
+        // produce one rather than grabbing the first black frame.
+        setTimeout(() => {
+          registerFace()
+            .then(result => { if (result) startFaceVerification(); })
+            .catch(err => console.error("Face enrolment failed:", err));
+        }, 2000);
       }).catch(err => {
         console.error("Error starting webcam:", err);
         setCameraError(true);
       });
     }, 1000);
-    
+
     requestFullScreen();
     
     const timer = setInterval(() => {
@@ -636,6 +650,26 @@ useEffect(() => {
             </StatusIcon>
             <StatusText>
               {!multipleFaces ? 'Single person detected' : 'Multiple people detected'}
+            </StatusText>
+          </StatusItem>
+
+          {/* Identity continuity. Only 'mismatch' is an error state: 'unknown'
+              and 'unavailable' mean no verdict was reached, which must not be
+              displayed as if the student had been caught at something. */}
+          <StatusItem status={faceMatch === 'mismatch' ? 'error' : 'ok'}>
+            <StatusIcon status={faceMatch === 'mismatch' ? 'error' : 'ok'}>
+              {faceMatch === 'mismatch' ? <FiAlertCircle size={18} /> : <FiCheckCircle size={18} />}
+            </StatusIcon>
+            <StatusText>
+              {faceMatch === 'mismatch'
+                ? 'Face does not match the enrolled one'
+                : faceMatch === 'match'
+                  ? 'Identity confirmed'
+                  : faceMatch === 'enrolled'
+                    ? 'Face enrolled for this session'
+                    : faceMatch === 'unavailable'
+                      ? 'Identity check unavailable'
+                      : 'Identity check pending'}
             </StatusText>
           </StatusItem>
 

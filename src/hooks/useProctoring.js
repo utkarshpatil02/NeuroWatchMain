@@ -20,6 +20,15 @@ const SCREENSHOT = {
   quality: 0.6,
 };
 
+// Identity continuity polling. Each check costs the server roughly a second of
+// CPU to compute a descriptor, paid per student, so this is deliberately
+// infrequent: swapping people mid-exam is not something that happens in the
+// gaps between seconds.
+const FACE_CHECK = {
+  intervalMs: 60000,
+  warnCooldownMs: 120000,
+};
+
 export const useProctoring = (sessionId) => {
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [tabFocused, setTabFocused] = useState(true);
@@ -30,6 +39,10 @@ export const useProctoring = (sessionId) => {
   // model did not load, so no claim is made either way.
   const [eyeMovement, setEyeMovement] = useState('normal');
   const [faceVerified, setFaceVerified] = useState(false);
+  // 'unknown' | 'enrolled' | 'match' | 'mismatch' | 'unavailable'.
+  // 'unknown' and 'unavailable' are explicitly not 'mismatch': the absence of
+  // a verdict must never read as an accusation.
+  const [faceMatch, setFaceMatch] = useState('unknown');
 
   const webcamRef = useRef(null);
   const streamRef = useRef(null);
@@ -43,6 +56,7 @@ export const useProctoring = (sessionId) => {
   const gazeStateRef = useRef('normal');
   const lastGazeWarnRef = useRef(0);
   const lastScreenshotRef = useRef(0);
+  const lastFaceWarnRef = useRef(0);
 
   // 'calibrating' until enough baseline samples are collected, then 'ready'.
   // No gaze verdict is issued while calibrating.
@@ -182,19 +196,28 @@ export const useProctoring = (sessionId) => {
     return canvas.toDataURL('image/jpeg', SCREENSHOT.quality);
   };
 
-  // Confirm a face is visible before the exam starts. There is no server-side
-  // face store to register against, so this checks the local webcam frame
-  // rather than uploading anything. (It previously called
-  // proctoringService.registerFace, which never existed and threw.)
+  // Enrol the session's reference face. The frame is sent to the server, which
+  // computes and stores the descriptor; the browser never produces one, since
+  // a client-computed descriptor could simply be fabricated.
   const registerFace = async () => {
     if (!sessionId) return null;
     try {
-      const screenshot = await takeScreenshot();
-      if (!screenshot) return null;
+      const image = screenshotDataUrl();
+      if (!image) return null;
+
+      const result = await proctoringService.registerFace(sessionId, image);
       setFaceVerified(true);
-      return { faceVerified: true };
+      setFaceMatch('enrolled');
+      return result;
     } catch (error) {
-      console.error('Error registering face:', error);
+      // 422 means no clearly visible face, which the student can fix.
+      const status = error?.response?.status;
+      if (status === 422) {
+        addWarning('Could not see your face clearly. Face the camera in good light.');
+      } else {
+        console.error('Error enrolling face:', error);
+      }
+      setFaceMatch('unavailable');
       return null;
     }
   };
@@ -352,18 +375,60 @@ export const useProctoring = (sessionId) => {
     // eslint-disable-next-line
   }, [webcamRef, faceApiLoadedRef]);
 
-  // Face checks run client-side in the detectFaces loop above, which already
-  // sets faceDetected/multipleFaces from real face-api.js detections. There is
-  // no server-side verification to poll: it would need face storage and
-  // recognition that the backend does not have, and returning a canned "pass"
-  // here would overwrite genuine detection results with a fake one.
+  // Poll the server to confirm the same person is still in front of the
+  // camera. Face presence and count stay client-side in the detectFaces loop;
+  // only identity continuity needs the server, because only the server can be
+  // trusted to compute the descriptor.
   //
-  // Eye-movement tracking is not implemented, so eyeMovement stays 'normal'.
+  // The interval is long on purpose: a descriptor costs roughly a second of
+  // CPU on the server, and that cost is paid per student.
   const startFaceVerification = () => {
     if (faceCheckIntervalRef.current) {
       clearInterval(faceCheckIntervalRef.current);
-      faceCheckIntervalRef.current = null;
     }
+
+    faceCheckIntervalRef.current = setInterval(async () => {
+      if (!sessionId) return;
+
+      const image = screenshotDataUrl();
+      if (!image) return;
+
+      try {
+        const result = await proctoringService.verifyFace(sessionId, image);
+
+        // No face in frame is handled by the client-side detector, which
+        // already warns. It is not evidence of impersonation, so it must not
+        // be reported as a mismatch.
+        if (!result?.faceDetected) return;
+
+        if (result.matched === true) {
+          setFaceMatch('match');
+          return;
+        }
+        if (result.matched !== false) {
+          // Indeterminate (no reference, malformed descriptor): make no claim.
+          setFaceMatch('unknown');
+          return;
+        }
+
+        setFaceMatch('mismatch');
+
+        const now = Date.now();
+        if (now - lastFaceWarnRef.current < FACE_CHECK.warnCooldownMs) return;
+        lastFaceWarnRef.current = now;
+
+        addWarning('The face on camera does not match the one this exam started with.');
+        logProctoringEvent('face_mismatch', { distance: result.distance });
+      } catch (error) {
+        // 409/503 mean verification is not set up for this session; there is
+        // nothing the student can do and nothing to report.
+        const status = error?.response?.status;
+        if (status !== 409 && status !== 503) {
+          console.error('Face verification error:', error);
+        }
+        setFaceMatch('unavailable');
+      }
+    }, FACE_CHECK.intervalMs);
   };
 
   // Log proctoring event, attaching a webcam screenshot where one is useful.
@@ -510,6 +575,7 @@ export const useProctoring = (sessionId) => {
     eyeMovement,
     gazeCalibration,
     faceVerified,
+    faceMatch,
     webcamRef,
     requestFullScreen,
     exitFullScreen,

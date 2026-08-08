@@ -71,6 +71,24 @@ export const proctoringService = {
     return response.data.data;
   },
 
+  // Enrol the session's reference face. The image is sent, not a descriptor:
+  // a descriptor computed in the browser could simply be made up.
+  registerFace: async (sessionId, imageDataUrl) => {
+    const response = await api.post(`/proctoring/sessions/${sessionId}/face`, {
+      image: imageDataUrl,
+    });
+    return response.data.data;
+  },
+
+  // Compare a later frame against the enrolled reference. The verdict is the
+  // server's; the client only reports the frame.
+  verifyFace: async (sessionId, imageDataUrl) => {
+    const response = await api.post(`/proctoring/sessions/${sessionId}/verify-face`, {
+      image: imageDataUrl,
+    });
+    return response.data.data;
+  },
+
   getSessionLogs: async (sessionId) => {
     const response = await api.get(`/proctoring/sessions/${sessionId}/logs`);
     return response.data.data;
