@@ -1,7 +1,9 @@
 import path from 'path';
+import { createServer } from 'http';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import express from 'express';
+import { Server as SocketServer } from 'socket.io';
 import session from 'express-session';
 import passport from 'passport';
 import { Strategy as LocalStrategy } from 'passport-local';
@@ -30,19 +32,28 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Session setup
-app.use(session({
+// Session setup.
+//
+// Held in variables rather than inlined so the socket.io server can reuse the
+// exact same middleware. A socket that did not go through these would carry no
+// user, and "who is asking" is the only thing standing between a proctor room
+// and anyone who can open a WebSocket.
+const sessionMiddleware = session({
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { 
+  cookie: {
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
-}));
-app.use(passport.initialize());
-app.use(passport.session());
+});
+const passportInit = passport.initialize();
+const passportSession = passport.session();
+
+app.use(sessionMiddleware);
+app.use(passportInit);
+app.use(passportSession);
 
 // Passport strategies
 //
@@ -879,6 +890,15 @@ app.post('/api/proctoring/log', requireAuth, async (req, res) => {
 
     if (error) throw error;
 
+    // Push to any proctor watching this exam. Deliberately after the insert
+    // succeeded, so nothing is announced that was not recorded.
+    broadcastProctoringEvent(session, {
+      eventType,
+      details: details ?? null,
+      hasScreenshot: screenshotPath !== null,
+      timestamp: base.timestamp
+    });
+
     res.status(201).json({
       data: { logged: true, eventType, screenshotStored: screenshotPath !== null }
     });
@@ -1177,5 +1197,88 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong!' });
 });
 
+// ---------------------------------------------------------------------------
+// Realtime
+//
+// api.js has always opened a socket and joined rooms; there was no server on
+// the other end, so proctors had to poll. Events now reach them as they happen.
+//
+// Rooms:
+//   exam:<examId>       proctors watching one exam
+//   session:<sessionId> a single student's session
+//
+// Sockets reuse the express session and passport middleware, so socket.request
+// .user is the same user the HTTP routes see. Without that, anyone able to open
+// a WebSocket could join a proctor room and watch every student in an exam.
+// ---------------------------------------------------------------------------
+const httpServer = createServer(app);
+
+const io = new SocketServer(httpServer, {
+  cors: { origin: ['http://localhost:3000', 'http://localhost:5173'], credentials: true }
+});
+
+const wrap = (middleware) => (socket, next) => middleware(socket.request, {}, next);
+io.use(wrap(sessionMiddleware));
+io.use(wrap(passportInit));
+io.use(wrap(passportSession));
+
+// Reject unauthenticated sockets at the handshake rather than per event.
+io.use((socket, next) => {
+  const user = socket.request.user;
+  if (!user) return next(new Error('unauthorized'));
+  socket.user = user;
+  next();
+});
+
+io.on('connection', (socket) => {
+  const { user } = socket;
+
+  // A student watching their own session. Admins may attach to any.
+  socket.on('join-exam-session', async (sessionId, ack) => {
+    try {
+      const session = await loadSession(sessionId);
+      if (!session) return ack?.({ ok: false, error: 'Session not found' });
+      if (!canAccessSession(user, session)) {
+        return ack?.({ ok: false, error: 'Forbidden' });
+      }
+      socket.join(`session:${session.session_id}`);
+      ack?.({ ok: true, room: `session:${session.session_id}` });
+    } catch (err) {
+      console.error('join-exam-session failed:', err);
+      ack?.({ ok: false, error: 'Could not join session' });
+    }
+  });
+
+  // Proctor rooms carry every student's events for an exam, so they are
+  // admin-only. A student joining one would be a data leak, not a nuisance.
+  socket.on('join-proctor-room', (examId, ack) => {
+    if (user.role !== 'admin') return ack?.({ ok: false, error: 'Forbidden' });
+    if (!examId) return ack?.({ ok: false, error: 'examId is required' });
+
+    socket.join(`exam:${examId}`);
+    ack?.({ ok: true, room: `exam:${examId}` });
+  });
+
+  socket.on('leave-proctor-room', (examId, ack) => {
+    socket.leave(`exam:${examId}`);
+    ack?.({ ok: true });
+  });
+});
+
+// Broadcast a proctoring event to the proctors watching that exam. Never
+// throws: realtime delivery is a convenience, and losing it must not fail the
+// request that recorded the event.
+const broadcastProctoringEvent = (session, payload) => {
+  try {
+    io.to(`exam:${session.exam_id}`).emit('proctoring-event', {
+      sessionId: session.session_id,
+      studentId: session.student_id,
+      ...payload
+    });
+  } catch (err) {
+    console.error('Realtime broadcast failed:', err.message);
+  }
+};
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+httpServer.listen(PORT, () => console.log(`Server running on port ${PORT} (with realtime)`));

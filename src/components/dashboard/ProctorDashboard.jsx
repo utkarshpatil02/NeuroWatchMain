@@ -6,6 +6,7 @@ import { FiUsers, FiAlertTriangle, FiCheckCircle, FiClock, FiSearch, FiEye, FiMe
 import Header from '../common/Header';
 import Card from '../common/Card';
 import Button from '../common/Button';
+import { proctoringService } from '../../services/api';
 
 const DashboardContainer = styled.div`
   min-height: 100vh;
@@ -215,14 +216,18 @@ const ProctorDashboard = () => {
   const [examTime, setExamTime] = useState(7200); // Default duration
   const [exams, setExams] = useState([]);
   const [selectedExam, setSelectedExam] = useState(null);
+  const [liveEvents, setLiveEvents] = useState([]);
 
-  // Fetch available exams
+  // Fetch available exams.
+  // /api/exams wraps its payload in { data } to match src/services/api.js,
+  // which reads response.data.data. This component talks to fetch directly,
+  // so it has to unwrap. The fallback keeps it working either way.
   useEffect(() => {
     fetch('http://localhost:5000/api/exams', {
       credentials: 'include'
     })
       .then(res => res.json())
-      .then(data => setExams(data))
+      .then(body => setExams(Array.isArray(body) ? body : body?.data ?? []))
       .catch(err => console.error('Error fetching exams:', err));
   }, []);
 
@@ -239,6 +244,40 @@ const ProctorDashboard = () => {
         })
         .catch(err => console.error('Error fetching students:', err));
     }
+  }, [selectedExam]);
+
+  // Live proctoring events for the selected exam.
+  //
+  // The socket stays disconnected until something asks for it, so opening the
+  // dashboard is what brings it up. Joining is admin-only and enforced on the
+  // server; a rejected join is reported rather than silently ignored, because
+  // "no events" and "not subscribed" look identical from here otherwise.
+  useEffect(() => {
+    if (!selectedExam) return undefined;
+
+    const socket = proctoringService.connectRealtime();
+    proctoringService.joinProctorRoom(selectedExam);
+
+    const unsubscribe = proctoringService.onProctoringEvent((event) => {
+      setLiveEvents(prev => [event, ...prev].slice(0, 50));
+
+      // Reflect the event against the student it came from, so the existing
+      // warning counts and status reflect what is happening now.
+      setStudents(prev => prev.map(student =>
+        student.id === event.studentId
+          ? {
+              ...student,
+              warnings: student.warnings + 1,
+              status: student.warnings + 1 >= 3 ? 'critical' : 'warning',
+            }
+          : student
+      ));
+    });
+
+    return () => {
+      unsubscribe();
+      socket?.emit?.('leave-proctor-room', selectedExam);
+    };
   }, [selectedExam]);
 
   // Filter students based on search term
@@ -464,6 +503,43 @@ const ProctorDashboard = () => {
               ))}
             </AnimatePresence>
           </StudentGrid>
+
+          {/* Live feed. Only rendered once an exam is selected, since that is
+              what subscribes to the room. */}
+          {selectedExam && (
+            <div style={{ marginTop: '32px' }}>
+              <h3 style={{ marginBottom: '12px' }}>
+                Live activity{liveEvents.length > 0 ? ` (${liveEvents.length})` : ''}
+              </h3>
+              {liveEvents.length === 0 ? (
+                <p style={{ color: 'var(--text-secondary, #667)', fontSize: '0.9rem' }}>
+                  Connected. Events will appear here as they happen.
+                </p>
+              ) : (
+                <div style={{ maxHeight: '260px', overflowY: 'auto' }}>
+                  {liveEvents.map((event, i) => (
+                    <div
+                      key={`${event.sessionId}-${event.timestamp}-${i}`}
+                      style={{
+                        display: 'flex', justifyContent: 'space-between', gap: '12px',
+                        padding: '8px 12px', marginBottom: '6px', borderRadius: '4px',
+                        backgroundColor: 'rgba(255, 190, 11, 0.1)', fontSize: '0.85rem',
+                      }}
+                    >
+                      <span style={{ fontWeight: 500 }}>{event.eventType}</span>
+                      <span style={{ opacity: 0.7 }}>
+                        session {String(event.sessionId).slice(0, 8)}…
+                        {event.hasScreenshot ? ' · screenshot' : ''}
+                      </span>
+                      <span style={{ opacity: 0.6 }}>
+                        {event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </motion.div>
       </DashboardContent>
     </DashboardContainer>
