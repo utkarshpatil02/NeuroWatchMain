@@ -1,4 +1,4 @@
-// Server-side face descriptor extraction and matching.
+﻿// Server-side face descriptor extraction and matching.
 //
 // Deliberately does NOT import @tensorflow/tfjs. face-api.js 0.22 bundles its
 // own tfjs-core 1.x; loading tfjs 4.x alongside it registers a second set of
@@ -27,6 +27,35 @@ export const FACE = {
   minDetectionScore: 0.5,
   // Largest frame accepted, to bound CPU cost per request.
   maxPixels: 1280 * 720,
+
+  // Detector resolution, and the only meaningful performance lever here.
+  //
+  // Cost is almost entirely detection. Landmarks and the descriptor are close
+  // to free, and the source image resolution makes no difference at all,
+  // because face-api rescales to inputSize regardless:
+  //
+  //   detector alone           source image (inputSize 416)   stages (416)
+  //     416  915 ms              320x240  797 ms                detect      783 ms
+  //     320  489 ms              480x360  803 ms                + landmarks 799 ms
+  //     224  238 ms              640x480  795 ms                + descriptor 789 ms
+  //     160  126 ms
+  //
+  // End to end through /face, which also pays a Supabase session lookup and
+  // HTTP overhead that no detector setting can remove:
+  //
+  //     inputSize 416   1044 ms   ~57 concurrent students per core @ 60s
+  //     inputSize 320    772 ms   ~77 concurrent students per core @ 60s
+  //
+  // Smaller values are faster but detect small or distant faces less reliably;
+  // for a webcam headshot the face fills enough of the frame that 320 is
+  // comfortable. Drop to 224 if throughput matters more than catching someone
+  // sitting well back from the camera.
+  //
+  // Note for anyone reaching for @tensorflow/tfjs-node: it will not help.
+  // face-api.js 0.22 pins tfjs-core 1.7.0, so a 4.x native backend registers
+  // against a different module instance and is simply never used. Native
+  // acceleration would require migrating off face-api.js first.
+  detectorInputSize: 320,
 };
 
 let loadPromise = null;
@@ -81,7 +110,10 @@ export const computeFaceDescriptor = async (jpegBuffer) => {
   const tensor = toTensor(decoded);
   try {
     const result = await faceapi
-      .detectSingleFace(tensor, new faceapi.TinyFaceDetectorOptions())
+      .detectSingleFace(
+        tensor,
+        new faceapi.TinyFaceDetectorOptions({ inputSize: FACE.detectorInputSize })
+      )
       .withFaceLandmarks()
       .withFaceDescriptor();
 
@@ -121,3 +153,5 @@ export const matchDescriptors = (reference, candidate) => {
   if (distance === null) return { matched: null, distance: null };
   return { matched: distance <= FACE.matchThreshold, distance };
 };
+
+
