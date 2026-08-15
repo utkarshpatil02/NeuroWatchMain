@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "test": "npm run test:gaze && npm run test:face",
+    "test": "npm run test:gaze && npm run test:face && npm run test:retention",
     "test:gaze": "node src/utils/gaze.test.mjs",
     "test:face": "node src/server/faceRecognition.test.mjs",
+    "test:retention": "node src/server/retention.test.mjs",
+    "retention": "node src/server/retention.cli.mjs",
     "preview": "vite preview",
     "server": "node src/server/index.js"
   },

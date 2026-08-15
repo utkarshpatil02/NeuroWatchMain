@@ -12,6 +12,7 @@ import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 import { FACE, computeFaceDescriptor, matchDescriptors } from './faceRecognition.js';
+import { RETENTION, runRetention, purgeSessionDescriptor } from './retention.js';
 
 // Load .env from this directory, not the process working directory
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -698,6 +699,16 @@ app.post('/api/exams/sessions/:sessionId/submit', requireAuth, async (req, res) 
 
     if (updateError) throw updateError;
 
+    // The reference face exists only to compare against during the exam. Once
+    // the session is submitted it is biometric data with no remaining purpose,
+    // so it goes now rather than waiting for a sweep. A failure here must not
+    // fail the submission - the retention sweep will catch it.
+    try {
+      await purgeSessionDescriptor(supabase, session.id);
+    } catch (err) {
+      console.error('Could not purge face descriptor on submit:', err.message);
+    }
+
     const { data: responses, error: responseError } = await supabase
       .from('responses')
       .select('score')
@@ -1280,5 +1291,49 @@ const broadcastProctoringEvent = (session, payload) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Retention sweep
+//
+// A policy nobody runs is not a policy. This enforces it without depending on
+// anyone remembering; `npm run retention` does the same thing on demand, and
+// is the better hook if you would rather drive it from cron than rely on this
+// process staying up.
+//
+// Failures are logged and never rethrown: an unhandled rejection on a timer
+// would take the server down, and the next sweep will retry anyway.
+// ---------------------------------------------------------------------------
+const RETENTION_SWEEP_MS = 6 * 60 * 60 * 1000; // four times a day
+
+const sweepRetention = async () => {
+  try {
+    const result = await runRetention(supabase);
+    const { screenshots, descriptors } = result;
+    if (screenshots.purged || descriptors.purged) {
+      console.log(
+        `Retention sweep: removed ${screenshots.purged} screenshot(s), ` +
+        `${descriptors.purged} descriptor(s)`
+      );
+    }
+    if (screenshots.skipped || descriptors.skipped) {
+      console.warn(
+        `Retention sweep skipped: ${screenshots.skipped ?? ''} ${descriptors.skipped ?? ''}`.trim()
+      );
+    }
+  } catch (err) {
+    console.error('Retention sweep failed:', err.message);
+  }
+};
+
 const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () => console.log(`Server running on port ${PORT} (with realtime)`));
+httpServer.listen(PORT, () => {
+  console.log(`Server running on port ${PORT} (with realtime)`);
+  console.log(
+    `Retention: screenshots ${RETENTION.screenshotDays}d, ` +
+    `descriptors purged at submit or after ${RETENTION.staleSessionDays}d`
+  );
+
+  // Run once shortly after boot so a restart does not skip a cycle, but not
+  // immediately, so startup is not competing with a storage sweep.
+  setTimeout(sweepRetention, 30000).unref?.();
+  setInterval(sweepRetention, RETENTION_SWEEP_MS).unref?.();
+});
