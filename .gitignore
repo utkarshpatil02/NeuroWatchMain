@@ -17,6 +17,10 @@ dist-ssr
 .env.*
 !.env.example
 
+# Generated documentation. The handbook PDF is a 1 MB build artifact rendered
+# from HTML; regenerate it rather than versioning it.
+NeuroWatch-Handbook.pdf
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
